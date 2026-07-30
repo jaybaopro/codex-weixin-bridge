@@ -1,0 +1,23 @@
+{
+  "name": "codex-weixin-bridge",
+  "version": "0.4.0",
+  "description": "Manage a local, project-scoped Weixin ClawBot to Codex bridge.",
+  "author": {
+    "name": "Internal Team",
+    "url": "https://github.com/jaybaopro"
+  },
+  "homepage": "https://github.com/jaybaopro/codex-weixin-bridge",
+  "repository": "https://github.com/jaybaopro/codex-weixin-bridge",
+  "license": "UNLICENSED",
+  "keywords": ["weixin", "codex", "bridge", "local"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "微信直连 Codex",
+    "shortDescription": "管理本机微信直连 Codex 服务",
+    "longDescription": "安全安装、绑定、诊断、更新和维护项目隔离的微信直连 Codex 本机服务。",
+    "developerName": "Internal Team",
+    "category": "Productivity",
+    "capabilities": ["Local automation", "Project-scoped access", "Approval-gated writes"],
+    "defaultPrompt": "检查并配置我的微信直连 Codex 服务。"
+  }
+}

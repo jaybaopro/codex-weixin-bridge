@@ -1,0 +1,10 @@
+.state/
+node_modules/
+.DS_Store
+.env
+.env.*
+*.tgz
+*.log
+wechat-login-qr.png
+approval-sandbox/*
+!approval-sandbox/.gitkeep

@@ -1,0 +1,35 @@
+{
+  "name": "codex-weixin-direct-bridge",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-scoped Weixin ClawBot to Codex App Server bridge without OpenClaw Gateway",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaybaopro/codex-weixin-bridge.git"
+  },
+  "bin": {
+    "codex-weixin-bridge": "./src/cli.mjs"
+  },
+  "files": [
+    "src/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "doctor": "node src/cli.mjs doctor",
+    "threads": "node src/cli.mjs threads",
+    "login": "node src/cli.mjs login",
+    "serve": "node src/cli.mjs serve",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0"
+  }
+}

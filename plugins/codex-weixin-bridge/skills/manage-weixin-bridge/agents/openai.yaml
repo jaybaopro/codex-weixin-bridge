@@ -1,0 +1,4 @@
+interface:
+  display_name: "管理微信直连 Codex"
+  short_description: "安全安装、绑定、诊断、更新和维护微信直连 Codex 本机服务"
+  default_prompt: "Use $manage-weixin-bridge to safely check and configure my Weixin-to-Codex bridge."
