@@ -1,6 +1,6 @@
 ---
 name: manage-weixin-bridge
-description: Install, configure, bind, diagnose, update, or remove the local Weixin ClawBot to Codex bridge. Use when the user asks about 微信直连 Codex, ClawBot bridge status, QR login, project whitelists, Codex task binding, the macOS background service, bridge upgrades, or safe uninstallation.
+description: Install, configure, bind, diagnose, update, back up, migrate, log out, or remove the local Weixin ClawBot to Codex bridge. Use when the user asks about 微信直连 Codex, ClawBot bridge status, QR login, project whitelists, Codex task binding, macOS or Windows background service, bridge upgrades, safe migration, or uninstallation.
 ---
 
 # Manage the Weixin bridge
@@ -23,6 +23,10 @@ project-scoped security boundary.
 - Use CLI commands instead of editing files under `~/.codex-weixin-direct/`.
 - Do not remove the state directory during ordinary uninstallation. Credential or
   state deletion requires a separate, explicit user request.
+- Never copy `credentials.json` to another machine. Use the safe backup and require
+  a new QR login and task binding on the destination.
+- Treat `logout` as a local credential removal. Do not claim Tencent server-side
+  revocation unless the upstream protocol adds a documented, verified endpoint.
 
 ## Choose the workflow
 
@@ -39,11 +43,23 @@ project-scoped security boundary.
 ### Install the CLI from a checked-out private repository
 
 1. Confirm the repository is the team-approved source.
-2. Run `zsh scripts/install-local.sh` from the repository root after approval.
+2. On macOS, run `zsh scripts/install-local.sh` from the repository root after
+   approval. On Windows, run
+   `powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1`.
 3. Run `codex-weixin-bridge doctor`.
 4. Stop if the isolation self-check fails.
 
-### Authorize Weixin
+### First-time setup
+
+1. Prefer `codex-weixin-bridge setup` so the user sees the project and task
+   selection in one resumable wizard.
+2. If the user already named the exact project and approved the defaults, the
+   Agent may pass `--cwd`, `--project-name`, `--project-id`, `--thread-index`,
+   and `--yes`.
+3. Never choose an arbitrary project or task merely to avoid asking the user.
+4. Verify the final binding by project name and task name, not by printing IDs.
+
+### Authorize Weixin manually
 
 1. Explain that scanning binds the local service to the authorizing Weixin user.
 2. After confirmation, run `codex-weixin-bridge login`.
@@ -79,21 +95,34 @@ project-scoped security boundary.
 
 6. Run `codex-weixin-bridge doctor` again.
 
-### Install or remove the macOS service
+### Install or remove the background service
 
 - Preview with `codex-weixin-bridge service-render`.
 - After confirmation, install with `codex-weixin-bridge service-install`.
 - Verify with `codex-weixin-bridge service-status`.
 - Remove only after confirmation with
   `codex-weixin-bridge service-uninstall`.
+- macOS uses LaunchAgent; Windows uses a per-user Task Scheduler task.
 
 ### Update
 
 1. Confirm no bridge turn or approval is active.
-2. Stop the service with `codex-weixin-bridge service-uninstall`.
-3. In the approved repository checkout, fast-forward to the reviewed version.
-4. Run `zsh scripts/install-local.sh`.
-5. Reinstall and verify the service only after confirmation.
+2. Run `codex-weixin-bridge check-update`.
+3. After confirmation, run `codex-weixin-bridge upgrade`.
+4. The command must verify the Release checksum, preserve a safe backup, stop
+   and restart the service, run `doctor`, and roll back on failure.
+5. Do not enable silent upgrades for ordinary colleagues; `upgrade --yes` is
+   limited to a separately approved managed environment.
 
 Preserve `~/.codex-weixin-direct/` so authorization, project registration, and
 binding survive ordinary upgrades.
+
+### Safe backup, migration, and logout
+
+- Create a non-secret backup with `codex-weixin-bridge backup`.
+- Restore with `codex-weixin-bridge restore --input "<file>"`, then run `setup`.
+- Explain that project paths may need remapping and a new QR login/task binding
+  is mandatory.
+- Use `codex-weixin-bridge logout` only after explicit confirmation. It creates
+  a safe backup, stops the service, deletes local credentials/runtime/binding,
+  and preserves the project registry and audit log.

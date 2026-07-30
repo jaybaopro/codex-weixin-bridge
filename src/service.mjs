@@ -5,9 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveCodexBinary } from "./codex-client.mjs";
-import { resolveStateDir } from "./state.mjs";
+import { hardenPrivatePath, resolveStateDir } from "./state.mjs";
 
 export const DEFAULT_SERVICE_LABEL = "com.codex.weixin.bridge";
+export const DEFAULT_WINDOWS_TASK_NAME = "CodexWeixinBridge";
 
 function xmlEscape(value) {
   return String(value)
@@ -41,6 +42,7 @@ function runLaunchctl(args, { allowFailure = false } = {}) {
 }
 
 export function resolveServiceConfig(overrides = {}) {
+  const platform = overrides.platform || process.platform;
   const homeDir = path.resolve(overrides.homeDir || os.homedir());
   const stateDir = path.resolve(overrides.stateDir || resolveStateDir());
   const cliPath = path.resolve(
@@ -57,6 +59,7 @@ export function resolveServiceConfig(overrides = {}) {
 
   const launchAgentsDir = path.join(homeDir, "Library", "LaunchAgents");
   return {
+    platform,
     label,
     homeDir,
     stateDir,
@@ -68,6 +71,10 @@ export function resolveServiceConfig(overrides = {}) {
     plistPath: path.join(launchAgentsDir, `${label}.plist`),
     serviceLog: path.join(stateDir, "service.log"),
     serviceErrorLog: path.join(stateDir, "service.error.log"),
+    windowsTaskName: overrides.windowsTaskName
+      || process.env.CODEX_WEIXIN_WINDOWS_TASK_NAME
+      || DEFAULT_WINDOWS_TASK_NAME,
+    windowsRunnerPath: path.join(stateDir, "run-bridge.cmd"),
     pathValue: unique([
       path.dirname(nodePath),
       path.join(homeDir, ".local", "bin"),
@@ -131,6 +138,28 @@ export function renderLaunchAgentPlist(config = resolveServiceConfig()) {
 `;
 }
 
+function cmdValue(value) {
+  const text = String(value);
+  if (/[\r\n"]/.test(text)) {
+    throw new Error("Windows 服务路径包含不支持的字符。");
+  }
+  return text;
+}
+
+export function renderWindowsRunnerCmd(config = resolveServiceConfig()) {
+  return [
+    "@echo off",
+    "setlocal",
+    `set "HOME=${cmdValue(config.homeDir)}"`,
+    `set "CODEX_WEIXIN_CODEX_BIN=${cmdValue(config.codexBin)}"`,
+    `set "CODEX_WEIXIN_STATE_DIR=${cmdValue(config.stateDir)}"`,
+    "set \"NO_COLOR=1\"",
+    `cd /d "${cmdValue(config.workingDirectory)}"`,
+    `"${cmdValue(config.nodePath)}" "${cmdValue(config.cliPath)}" serve >>"${cmdValue(config.serviceLog)}" 2>>"${cmdValue(config.serviceErrorLog)}"`,
+    "",
+  ].join("\r\n");
+}
+
 export function installLaunchAgent(config = resolveServiceConfig()) {
   assertMacOS();
   fs.mkdirSync(path.dirname(config.plistPath), { recursive: true, mode: 0o700 });
@@ -180,4 +209,105 @@ export function uninstallLaunchAgent(config = resolveServiceConfig()) {
     removed = true;
   }
   return { removed, config };
+}
+
+function assertWindows() {
+  if (process.platform !== "win32") {
+    throw new Error("Windows 计划任务只能在 Windows 上安装。");
+  }
+}
+
+function runSchtasks(args, { allowFailure = false } = {}) {
+  const result = spawnSync("schtasks.exe", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  if (!allowFailure && result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new Error(`schtasks ${args.join(" ")} 失败${detail ? `：${detail}` : ""}`);
+  }
+  return result;
+}
+
+export function installWindowsTask(config = resolveServiceConfig()) {
+  assertWindows();
+  fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
+  hardenPrivatePath(config.stateDir, { directory: true });
+  fs.writeFileSync(config.windowsRunnerPath, renderWindowsRunnerCmd(config), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  hardenPrivatePath(config.windowsRunnerPath);
+  const taskCommand = `cmd.exe /d /c \\"${config.windowsRunnerPath}\\"`;
+  runSchtasks([
+    "/Create",
+    "/F",
+    "/SC", "ONLOGON",
+    "/RL", "LIMITED",
+    "/TN", config.windowsTaskName,
+    "/TR", taskCommand,
+  ]);
+  runSchtasks(["/Run", "/TN", config.windowsTaskName]);
+  return config;
+}
+
+export function windowsTaskStatus(config = resolveServiceConfig()) {
+  assertWindows();
+  const result = runSchtasks([
+    "/Query",
+    "/TN", config.windowsTaskName,
+    "/FO", "LIST",
+    "/V",
+  ], { allowFailure: true });
+  const output = (result.stdout || result.stderr || "").trim();
+  return {
+    installed: result.status === 0,
+    running: result.status === 0 && /Running|正在运行/i.test(output),
+    output,
+    config,
+  };
+}
+
+export function uninstallWindowsTask(config = resolveServiceConfig()) {
+  assertWindows();
+  runSchtasks([
+    "/End",
+    "/TN", config.windowsTaskName,
+  ], { allowFailure: true });
+  const result = runSchtasks([
+    "/Delete",
+    "/F",
+    "/TN", config.windowsTaskName,
+  ], { allowFailure: true });
+  let removed = result.status === 0;
+  if (fs.existsSync(config.windowsRunnerPath)) {
+    fs.unlinkSync(config.windowsRunnerPath);
+    removed = true;
+  }
+  return { removed, config };
+}
+
+export function renderServiceDefinition(config = resolveServiceConfig()) {
+  if (config.platform === "darwin") return renderLaunchAgentPlist(config);
+  if (config.platform === "win32") return renderWindowsRunnerCmd(config);
+  throw new Error("常驻服务目前支持 macOS 和 Windows。");
+}
+
+export function installBackgroundService(config = resolveServiceConfig()) {
+  if (process.platform === "darwin") return installLaunchAgent(config);
+  if (process.platform === "win32") return installWindowsTask(config);
+  throw new Error("常驻服务目前支持 macOS 和 Windows。");
+}
+
+export function backgroundServiceStatus(config = resolveServiceConfig()) {
+  if (process.platform === "darwin") return serviceStatus(config);
+  if (process.platform === "win32") return windowsTaskStatus(config);
+  throw new Error("常驻服务目前支持 macOS 和 Windows。");
+}
+
+export function uninstallBackgroundService(config = resolveServiceConfig()) {
+  if (process.platform === "darwin") return uninstallLaunchAgent(config);
+  if (process.platform === "win32") return uninstallWindowsTask(config);
+  throw new Error("常驻服务目前支持 macOS 和 Windows。");
 }

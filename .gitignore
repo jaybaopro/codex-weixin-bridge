@@ -5,6 +5,7 @@ node_modules/
 .env.*
 *.tgz
 *.log
+dist/
 wechat-login-qr.png
 approval-sandbox/*
 !approval-sandbox/.gitkeep

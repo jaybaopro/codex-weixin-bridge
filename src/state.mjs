@@ -1,6 +1,46 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+
+function windowsPrincipal() {
+  const username = os.userInfo().username;
+  return process.env.USERDOMAIN
+    ? `${process.env.USERDOMAIN}\\${username}`
+    : username;
+}
+
+function hardenWindowsPath(filePath, { directory = false } = {}) {
+  const permission = directory ? "(OI)(CI)F" : "F";
+  const result = spawnSync("icacls", [
+    filePath,
+    "/inheritance:r",
+    "/grant:r",
+    `${windowsPrincipal()}:${permission}`,
+  ], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new Error(`无法收紧 Windows 状态权限：${detail || filePath}`);
+  }
+}
+
+export function hardenPrivatePath(filePath, { directory = false } = {}) {
+  if (process.platform === "win32") {
+    hardenWindowsPath(filePath, { directory });
+  } else {
+    fs.chmodSync(filePath, directory ? 0o700 : 0o600);
+  }
+}
+
+export function ensureStateDir() {
+  const dir = resolveStateDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  hardenPrivatePath(dir, { directory: true });
+  return dir;
+}
 
 export function resolveStateDir() {
   return path.resolve(
@@ -26,9 +66,7 @@ export function readJson(name, { required = false } = {}) {
 }
 
 export function writeJsonPrivate(name, value) {
-  const dir = resolveStateDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+  const dir = ensureStateDir();
 
   const filePath = statePath(name);
   const tempPath = `${filePath}.${process.pid}.tmp`;
@@ -36,16 +74,14 @@ export function writeJsonPrivate(name, value) {
     encoding: "utf8",
     mode: 0o600,
   });
-  fs.chmodSync(tempPath, 0o600);
+  hardenPrivatePath(tempPath);
   fs.renameSync(tempPath, filePath);
-  fs.chmodSync(filePath, 0o600);
+  hardenPrivatePath(filePath);
   return filePath;
 }
 
 export function appendAuditPrivate(event, fields = {}) {
-  const dir = resolveStateDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+  ensureStateDir();
   const filePath = statePath("audit.jsonl");
   const allowed = {};
   for (const [key, value] of Object.entries(fields)) {
@@ -61,14 +97,23 @@ export function appendAuditPrivate(event, fields = {}) {
     encoding: "utf8",
     mode: 0o600,
   });
-  fs.chmodSync(filePath, 0o600);
+  hardenPrivatePath(filePath);
   return filePath;
 }
 
+export function removeStateFile(name) {
+  const filePath = statePath(name);
+  try {
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export function acquireProcessLock() {
-  const dir = resolveStateDir();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+  ensureStateDir();
   const filePath = statePath("bridge.lock");
 
   const create = () => {

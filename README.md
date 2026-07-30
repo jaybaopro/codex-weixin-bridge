@@ -1,11 +1,14 @@
 # 微信直连 Codex 桥接器
 
-团队内测版 `0.4.0`：让每位同事在自己的 Mac 上，通过自己的微信 ClawBot
+团队内测版 `0.5.0`：让每位同事在自己的 Mac 或 Windows 电脑上，通过自己的微信 ClawBot
 继续自己的 Codex 项目任务。
 
-代码可以放在团队私有 GitHub 仓库中分发，不需要提交到 Codex 官方插件目录。
+代码通过公开 GitHub 仓库分发，不需要提交到 Codex 官方插件目录。
 运行时直接连接腾讯微信 iLink 和本机 Codex App Server，不启动或经过
 OpenClaw Gateway。
+
+仓库公开可见，但当前仍采用 `Internal Use Notice`：公开可见不等于授予外部商业
+分发或再许可权。团队成员可以按组织授权使用。
 
 ## 安全边界
 
@@ -22,21 +25,23 @@ OpenClaw Gateway。
 - Codex App Server 使用本机 `stdio`，不监听网络端口。
 - 日志和审计元数据不记录微信消息正文。
 
-当前版本按“一位同事、一台 Mac、一个微信授权身份、一个状态目录”设计。不要让
+当前版本按“一位同事、一台电脑、一个微信授权身份、一个状态目录”设计。不要让
 多位同事共用同一个桥接实例。
 
 ## 支持环境
 
-- macOS
+- macOS 13 或更新版本
+- Windows 11（Windows 10 仅做尽力支持）
 - Node.js 22 或更高版本
 - 已安装并登录 Codex 桌面版或 CLI
 - 同事对自己的本地项目目录拥有正常访问权限
 
-Windows/Linux 常驻服务尚未接入。
+macOS 使用当前用户的 LaunchAgent；Windows 使用当前用户的登录计划任务，不要求
+把桥接器安装成管理员级系统服务。Linux 常驻服务尚未接入。
 
-## 从团队 GitHub 安装
+## 通过 GitHub 和本机 Agent 安装
 
-先确保自己的 GitHub 账号已经获得私有仓库访问权限，然后运行：
+把仓库链接交给同事电脑上的 Codex Agent，或直接运行：
 
 ```bash
 git clone https://github.com/jaybaopro/codex-weixin-bridge.git
@@ -44,8 +49,28 @@ cd codex-weixin-bridge
 zsh scripts/install-local.sh
 ```
 
-脚本会把 CLI 安装到当前用户的 npm 全局目录并执行安全自检。它不会自动扫码、
-添加项目、绑定任务或启动常驻服务。
+脚本会把 CLI 安装到当前用户的 npm 全局目录并执行安全自检。完成安装后运行：
+
+```bash
+codex-weixin-bridge setup
+```
+
+Agent 可以在获得网络和命令执行批准后完成 clone、安装及启动向导；扫码、全局安装、
+后台服务安装仍需要使用者确认。GitHub 链接本身不能绕过公司设备策略。
+
+## Windows 通过 GitHub 和本机 Agent 安装
+
+先安装 Git、Node.js 22 和 Codex，然后在 PowerShell 中运行：
+
+```powershell
+git clone https://github.com/jaybaopro/codex-weixin-bridge.git
+cd codex-weixin-bridge
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+```
+
+安装脚本会执行自检并打开同一套 `setup` 向导。Agent 也可以按此流程协助安装；
+如果设备由公司集中管理，PowerShell 执行策略、GitHub 网络访问或计划任务策略
+仍可能需要 IT 放行。
 
 也可以手动安装：
 
@@ -56,14 +81,37 @@ codex-weixin-bridge doctor
 
 ## 首次配置
 
+推荐直接运行：
+
+```bash
+codex-weixin-bridge setup
+```
+
+向导会依次检查 Codex、微信扫码、登记项目、列出该项目的任务、绑定任务并安装
+当前平台的用户级常驻服务。中断后可以重新运行，已完成的微信授权会被复用。
+
+Agent 自动化可传入已确认的非敏感选项：
+
+```bash
+codex-weixin-bridge setup \
+  --cwd "/absolute/project/path" \
+  --project-name "Project name" \
+  --project-id "project-id" \
+  --thread-index 1 \
+  --yes
+```
+
+`--yes` 只接受向导内的预期步骤，不会放宽项目隔离或微信侧写入审批。以下命令仍可
+用于分步配置和排错。
+
 ### 1. 微信授权
 
 ```bash
 codex-weixin-bridge login
 ```
 
-微信凭证保存在 `~/.codex-weixin-direct/credentials.json`。状态目录权限为
-`0700`，敏感文件权限为 `0600`。
+微信凭证保存在 `~/.codex-weixin-direct/credentials.json`。macOS 状态目录权限为
+`0700`、敏感文件为 `0600`；Windows 使用 `icacls` 关闭继承并只授权当前用户。
 
 ### 2. 登记允许访问的项目
 
@@ -104,10 +152,10 @@ codex-weixin-bridge bind \
 codex-weixin-bridge doctor
 ```
 
-## macOS 常驻服务
+## macOS / Windows 常驻服务
 
 桥接器会根据使用者自己的 Home 目录、Node 路径、Codex 路径和状态目录动态生成
-LaunchAgent，不包含开发者个人路径。
+macOS LaunchAgent 或 Windows 用户级计划任务，不包含开发者个人路径。
 
 先预览：
 
@@ -136,6 +184,58 @@ codex-weixin-bridge service-uninstall
 - `~/.codex-weixin-direct/service.error.log`
 - `~/.codex-weixin-direct/audit.jsonl`
 
+## 检查更新与安全升级
+
+公开 GitHub Release 无需登录即可查询：
+
+```bash
+codex-weixin-bridge check-update
+codex-weixin-bridge upgrade
+```
+
+`upgrade` 会在确认后创建不含凭证的安全备份、停止服务、下载 GitHub Release 中的
+npm 安装包、核验 SHA-256、安装新版本、执行 `doctor` 并恢复服务。任何一步失败会
+尝试自动安装本次升级前生成的回滚包。无人值守的受控环境可以使用
+`codex-weixin-bridge upgrade --yes`；普通同事默认保留确认，不做静默升级。
+
+每个 Release 必须包含且仅包含：
+
+- `codex-weixin-direct-bridge-<version>.tgz`
+- `codex-weixin-direct-bridge-<version>.tgz.sha256`
+
+推送 `v*` tag 后，Release workflow 会在 macOS 和 Windows 上通过测试，再自动创建或
+更新对应 GitHub Release 并上传这两个升级资产。
+
+## 退出微信授权、备份和迁移
+
+创建默认安全备份：
+
+```bash
+codex-weixin-bridge backup
+```
+
+指定文件并在另一台电脑导入：
+
+```bash
+codex-weixin-bridge backup --output "/safe/path/bridge-backup.json"
+codex-weixin-bridge restore --input "/safe/path/bridge-backup.json"
+codex-weixin-bridge setup
+```
+
+安全备份只保存项目登记和脱敏的绑定提示，不保存微信凭证、消息正文、日志、账号
+ID 或完整任务 ID。迁移到新电脑后必须重新扫码、映射本机项目路径并重新选择任务；
+当前版本不提供“复制在线微信 token 到另一台机器”的迁移模式。
+
+退出本机授权：
+
+```bash
+codex-weixin-bridge logout
+```
+
+它会先创建安全备份，停止服务，并删除本机凭证、运行游标、二维码和当前绑定；
+项目白名单与审计记录保留。腾讯目前公开的 iLink 接口没有可验证的服务端撤销
+端点，因此此命令只承诺本机退出，不声称已在腾讯服务器远程吊销 token。
+
 ## 微信控制命令
 
 ```text
@@ -160,9 +260,9 @@ codex-weixin-bridge service-uninstall
 
 ## 可选的 Codex Plugin 和管理 Skill
 
-`plugins/codex-weixin-bridge/` 是仓库内的私有管理入口，不是官方插件投稿。
+`plugins/codex-weixin-bridge/` 是仓库内的团队管理入口，不是官方插件投稿。
 
-直接从团队私有 GitHub 仓库添加：
+直接从 GitHub 仓库添加：
 
 ```bash
 codex plugin marketplace add jaybaopro/codex-weixin-bridge
@@ -172,8 +272,7 @@ codex plugin add codex-weixin-bridge@codex-weixin-team
 安装后，新建 Codex 任务并调用 `$manage-weixin-bridge`，Codex 会按照固定安全流程
 完成诊断、扫码、项目登记、任务绑定、服务安装或更新。
 
-这个 marketplace 是团队私有来源，不会出现在官方公共插件目录。私有仓库成员
-需要先在本机配置 GitHub 访问权限。
+这个 marketplace 是仓库内的自托管来源，不会出现在 Codex 官方公共插件目录。
 
 ## 开发验证
 
@@ -183,7 +282,7 @@ npm test
 npm pack --dry-run
 ```
 
-GitHub Actions 会在 macOS 和 Node.js 22 环境中执行这些检查。
+GitHub Actions 会在 macOS、Windows 和 Node.js 22 环境中执行这些检查。
 
 ## 协议和第三方组件
 

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 import {
   EXPECTED_PERMISSION_PROFILE,
@@ -21,11 +21,30 @@ function executable(pathname) {
 }
 
 export function resolveCodexBinary() {
+  const lookups = process.platform === "win32"
+    ? [
+      spawnSync("where.exe", ["codex.exe"], {
+        encoding: "utf8",
+        windowsHide: true,
+      }),
+      spawnSync("where.exe", ["codex.cmd"], {
+        encoding: "utf8",
+        windowsHide: true,
+      }),
+    ]
+    : [spawnSync("which", ["codex"], { encoding: "utf8" })];
+  const discovered = lookups.flatMap((lookup) => (
+    lookup.status === 0
+      ? lookup.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+      : []
+  ));
   const candidates = [
     process.env.CODEX_WEIXIN_CODEX_BIN,
     "/Applications/Codex.app/Contents/Resources/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
     path.join(os.homedir(), ".local/bin/codex"),
+    path.join(os.homedir(), "AppData", "Roaming", "npm", "codex.cmd"),
+    ...discovered,
   ].filter(Boolean);
   const match = candidates.find(executable);
   if (!match) {
@@ -65,6 +84,8 @@ export class CodexAppServer extends EventEmitter {
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: process.env,
+        windowsHide: true,
+        shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(this.codexBin),
       },
     );
     this.child.stderr.on("data", (chunk) => {

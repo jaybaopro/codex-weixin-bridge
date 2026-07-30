@@ -9,7 +9,10 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-14
+    strategy:
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
