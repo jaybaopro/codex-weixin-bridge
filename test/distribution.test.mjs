@@ -23,7 +23,7 @@ function readJson(relativePath) {
 
 test("distribution package exposes a global CLI and direct QR dependency", () => {
   const pkg = readJson("package.json");
-  assert.equal(pkg.version, "0.6.0");
+  assert.equal(pkg.version, "0.6.1");
   assert.equal(pkg.private, true);
   assert.equal(pkg.bin["codex-weixin-bridge"], "./src/cli.mjs");
   assert.equal(pkg.dependencies["qrcode-terminal"], "0.12.0");
@@ -116,7 +116,7 @@ test("repo marketplace points to the self-hosted management plugin", () => {
     "plugins/codex-weixin-bridge/.codex-plugin/plugin.json",
   );
   assert.equal(manifest.name, "codex-weixin-bridge");
-  assert.equal(manifest.version, "0.6.0");
+  assert.equal(manifest.version, "0.6.1");
   assert.equal(manifest.skills, "./skills/");
 });
 
@@ -135,4 +135,14 @@ test("publishable runtime files contain no developer home path", () => {
     const text = fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
     assert.doesNotMatch(text, /\/Users\/jay\.bao/, relativePath);
   }
+});
+
+test("release checksum is portable and does not embed the runner path", () => {
+  const script = fs.readFileSync(
+    path.join(repoRoot, "scripts/build-release-assets.sh"),
+    "utf8",
+  );
+  assert.match(script, /cd "\$\{dist_dir\}"/);
+  assert.match(script, /shasum -a 256 "\$\{package_name\}"/);
+  assert.doesNotMatch(script, /shasum -a 256 "\$\{archive\}"/);
 });

@@ -11,7 +11,10 @@ package_name="$(npm pack "${repo_dir}" \
   --cache "${bridge_npm_cache}" \
   --silent)"
 archive="${dist_dir}/${package_name}"
-shasum -a 256 "${archive}" > "${archive}.sha256"
+(
+  cd "${dist_dir}"
+  shasum -a 256 "${package_name}" > "${package_name}.sha256"
+)
 
 echo "${archive}"
 echo "${archive}.sha256"
