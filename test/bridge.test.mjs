@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import { assertBinding } from "../src/state.mjs";
@@ -14,6 +15,11 @@ import {
   parseRoutingMessage,
   projectForBinding,
 } from "../src/routing.mjs";
+
+const testRoot = path.resolve("test-runtime");
+const projectRoot = path.join(testRoot, "project");
+const otherRoot = path.join(testRoot, "other");
+const project7Root = path.join(testRoot, "project-7");
 
 test("extractText accepts only inbound user text", () => {
   assert.equal(
@@ -38,8 +44,8 @@ test("splitMessage preserves all text across chunks", () => {
 
 test("assertBinding requires an absolute cwd and thread id", () => {
   assert.deepEqual(
-    assertBinding({ cwd: "/tmp/project", threadId: "thread-1" }),
-    { cwd: "/tmp/project", threadId: "thread-1" },
+    assertBinding({ cwd: projectRoot, threadId: "thread-1" }),
+    { cwd: projectRoot, threadId: "thread-1" },
   );
   assert.throws(
     () => assertBinding({ cwd: "relative", threadId: "thread-1" }),
@@ -61,13 +67,13 @@ test("approval control messages are explicit and code-scoped", () => {
 });
 
 test("project boundary rejects sibling and parent paths", () => {
-  assert.equal(isWithinRoot("/tmp/project", "/tmp/project/a.txt"), true);
-  assert.equal(isWithinRoot("/tmp/project", "/tmp/project-2/a.txt"), false);
-  assert.equal(isWithinRoot("/tmp/project", "/tmp/a.txt"), false);
+  assert.equal(isWithinRoot(projectRoot, path.join(projectRoot, "a.txt")), true);
+  assert.equal(isWithinRoot(projectRoot, `${projectRoot}-2${path.sep}a.txt`), false);
+  assert.equal(isWithinRoot(projectRoot, path.join(testRoot, "a.txt")), false);
 });
 
 test("approval policy allows project file edits but blocks deletion and command escalation", () => {
-  const binding = { cwd: "/tmp/project", threadId: "thread-1" };
+  const binding = { cwd: projectRoot, threadId: "thread-1" };
   const fileRequest = {
     method: "item/fileChange/requestApproval",
     params: { threadId: "thread-1", itemId: "item-1" },
@@ -87,7 +93,7 @@ test("approval policy allows project file edits but blocks deletion and command 
     method: "item/commandExecution/requestApproval",
     params: {
       threadId: "thread-1",
-      cwd: "/tmp/project",
+      cwd: projectRoot,
       command: "curl https://example.com",
     },
   };
@@ -122,18 +128,18 @@ test("project registry is explicit and binding must match its cwd", () => {
     projects: [{
       id: "project-7",
       name: "项目 7",
-      cwd: "/tmp/project-7",
+      cwd: project7Root,
       enabled: true,
     }],
   });
   assert.equal(projectForBinding(registry, {
     projectId: "project-7",
-    cwd: "/tmp/project-7",
+    cwd: project7Root,
     threadId: "thread-1",
   }).name, "项目 7");
   assert.throws(() => projectForBinding(registry, {
     projectId: "project-7",
-    cwd: "/tmp/other",
+    cwd: otherRoot,
     threadId: "thread-1",
   }), /白名单/);
 });
@@ -145,13 +151,13 @@ test("project registry rejects nested or overlapping project roots", () => {
       {
         id: "parent",
         name: "父项目",
-        cwd: "/tmp/projects",
+        cwd: path.join(testRoot, "projects"),
         enabled: true,
       },
       {
         id: "child",
         name: "子项目",
-        cwd: "/tmp/projects/child",
+        cwd: path.join(testRoot, "projects", "child"),
         enabled: true,
       },
     ],
@@ -159,17 +165,17 @@ test("project registry rejects nested or overlapping project roots", () => {
 });
 
 test("permission escalation can grant only project-local writes", () => {
-  const binding = { cwd: "/tmp/project", threadId: "thread-1" };
+  const binding = { cwd: projectRoot, threadId: "thread-1" };
   const base = {
     method: "item/permissions/requestApproval",
     params: {
       threadId: "thread-1",
-      cwd: "/tmp/project",
+      cwd: projectRoot,
       permissions: {
         fileSystem: {
           entries: [{
             access: "write",
-            path: { type: "path", path: "/tmp/project/notes.txt" },
+            path: { type: "path", path: path.join(projectRoot, "notes.txt") },
           }],
         },
       },
@@ -180,7 +186,7 @@ test("permission escalation can grant only project-local writes", () => {
   assert.equal(allowed.acceptResult.scope, "turn");
 
   const outside = structuredClone(base);
-  outside.params.permissions.fileSystem.entries[0].path.path = "/tmp/other/data.txt";
+  outside.params.permissions.fileSystem.entries[0].path.path = path.join(otherRoot, "data.txt");
   assert.match(
     assessApprovalRequest({ request: outside, binding }).reason,
     /超出当前项目/,
