@@ -149,5 +149,7 @@ export function routingHelp() {
     "切换 3",
     "状态",
     "取消任务",
+    "清空队列",
+    "重连",
   ].join("\n");
 }

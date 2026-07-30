@@ -176,23 +176,100 @@ export async function sendText(credentials, {
   contextToken,
 }) {
   const baseUrl = normalizeBaseUrl(credentials.baseUrl);
-  return requestJson(`${baseUrl}/ilink/bot/sendmessage`, {
+  const body = {
+    msg: {
+      from_user_id: "",
+      to_user_id: to,
+      client_id: `codex-weixin-${crypto.randomUUID()}`,
+      message_type: 2,
+      message_state: 2,
+      item_list: [{ type: 1, text_item: { text } }],
+      context_token: contextToken,
+    },
+    base_info: baseInfo(),
+  };
+  const response = await requestJson(`${baseUrl}/ilink/bot/sendmessage`, {
     method: "POST",
     token: credentials.token,
     timeoutMs: 20_000,
+    body,
+  });
+  if ((response.ret ?? 0) !== 0) {
+    throw new Error(
+      `微信 sendMessage 失败: ret=${response.ret} ${response.errmsg || ""}`,
+    );
+  }
+  return response;
+}
+
+export async function getTypingTicket(credentials, {
+  userId,
+  contextToken,
+}) {
+  const baseUrl = normalizeBaseUrl(credentials.baseUrl);
+  const response = await requestJson(`${baseUrl}/ilink/bot/getconfig`, {
+    method: "POST",
+    token: credentials.token,
+    timeoutMs: 10_000,
     body: {
-      msg: {
-        from_user_id: "",
-        to_user_id: to,
-        client_id: `codex-weixin-${crypto.randomUUID()}`,
-        message_type: 2,
-        message_state: 2,
-        item_list: [{ type: 1, text_item: { text } }],
-        context_token: contextToken,
-      },
+      ilink_user_id: userId,
+      context_token: contextToken,
       base_info: baseInfo(),
     },
   });
+  if ((response.ret ?? 0) !== 0 || !response.typing_ticket) {
+    throw new Error(
+      `微信 getConfig 未返回 typing ticket: ret=${response.ret} ${response.errmsg || ""}`,
+    );
+  }
+  return response.typing_ticket;
+}
+
+export async function sendTyping(credentials, {
+  userId,
+  typingTicket,
+  status,
+}) {
+  const baseUrl = normalizeBaseUrl(credentials.baseUrl);
+  const response = await requestJson(`${baseUrl}/ilink/bot/sendtyping`, {
+    method: "POST",
+    token: credentials.token,
+    timeoutMs: 10_000,
+    body: {
+      ilink_user_id: userId,
+      typing_ticket: typingTicket,
+      status,
+      base_info: baseInfo(),
+    },
+  });
+  if ((response.ret ?? 0) !== 0) {
+    throw new Error(
+      `微信 sendTyping 失败: ret=${response.ret} ${response.errmsg || ""}`,
+    );
+  }
+  return response;
+}
+
+export async function setTyping(credentials, {
+  userId,
+  contextToken,
+  typingTicket,
+  active,
+}) {
+  const ticket = typingTicket || await getTypingTicket(credentials, {
+    userId,
+    contextToken,
+  });
+  await sendTyping(credentials, {
+    userId,
+    typingTicket: ticket,
+    status: active ? 1 : 2,
+  });
+  return ticket;
+}
+
+export function isSessionExpiredResponse(response) {
+  return Number(response?.errcode) === -14;
 }
 
 export function extractText(message) {

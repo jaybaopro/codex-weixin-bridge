@@ -41,6 +41,8 @@ export function createApprovalCode(existing = new Set()) {
 export function parseControlMessage(text) {
   const normalized = String(text || "").trim();
   if (/^取消任务$/.test(normalized)) return { action: "cancel" };
+  if (/^(清空队列|清除队列)$/.test(normalized)) return { action: "clearQueue" };
+  if (/^(重连|\/reconnect)$/i.test(normalized)) return { action: "reconnect" };
   if (/^(状态|\/状态|\/status)$/i.test(normalized)) return { action: "status" };
   const match = normalized.match(/^(同意|批准|拒绝)\s*(\d{4})$/);
   if (!match) return null;
