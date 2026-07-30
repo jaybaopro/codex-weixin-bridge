@@ -10,6 +10,7 @@ import {
 } from "./state.mjs";
 import { assertProjectRegistry } from "./routing.mjs";
 import { BRIDGE_VERSION } from "./version.mjs";
+import { clearInboundInbox } from "./inbound-media.mjs";
 
 export const BACKUP_FORMAT = "codex-weixin-safe-backup";
 export const BACKUP_VERSION = 1;
@@ -163,8 +164,10 @@ export function logoutLocalState() {
   ]) {
     if (removeStateFile(name)) removed.push(name);
   }
+  const removedInboundDirectories = clearInboundInbox();
   return {
     removed,
+    removedInboundDirectories,
     preserved: ["projects.json", "audit.jsonl"],
     serverTokenRevoked: false,
   };

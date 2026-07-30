@@ -34,13 +34,19 @@ import {
   runtimeSettings,
 } from "./runtime-control.mjs";
 import {
-  extractText,
   getUpdates,
   isSessionExpiredResponse,
   sendText,
   setTyping,
   splitMessage,
 } from "./weixin-api.mjs";
+import {
+  cleanupStaleInbound,
+  inspectInboundMessage,
+  mediaSummary,
+  prepareInboundAttachment,
+  removeInboundDirectory,
+} from "./inbound-media.mjs";
 import { BRIDGE_VERSION } from "./version.mjs";
 
 function messageKey(message) {
@@ -114,11 +120,16 @@ async function runBridgeLocked({
   let connectionFailures = 0;
   let longPollTimeoutMs = 40_000;
   const serviceStartedAt = Date.now();
+  const staleInboundRemoved = cleanupStaleInbound();
 
   log(`微信直连已启动：${binding.cwd}`);
   log(`Codex task: ${binding.threadId}`);
   log(`隔离配置：${isolation.permissionProfile}；MCP=${isolation.mcpServerCount}`);
   log("当前权限：仅当前项目可读；项目内文件写入需要微信单次确认；命令提权禁用。");
+  log("附件边界：图片/PDF/文本附件只读；私有收件箱用后清理；语音/视频禁用。");
+  if (staleInboundRemoved) {
+    log(`已清理 ${staleInboundRemoved} 个过期附件隔离目录。`);
+  }
   appendAuditPrivate("service_start", {
     projectId: selectedProject.id,
     threadId: binding.threadId,
@@ -351,7 +362,24 @@ async function runBridgeLocked({
     drainTimer.unref?.();
   };
 
-  startTurn = ({ from, contextToken, text, messageCount = 1 }) => {
+  const cleanupAttachments = (attachments = []) => {
+    for (const attachment of attachments) {
+      if (!attachment.cleanupDirectory) continue;
+      try {
+        removeInboundDirectory(attachment.cleanupDirectory);
+      } catch (error) {
+        errorLog(`附件隔离目录清理失败：${error.message}`);
+      }
+    }
+  };
+
+  startTurn = ({
+    from,
+    contextToken,
+    text,
+    attachments = [],
+    messageCount = 1,
+  }) => {
     const turn = {
       from,
       contextToken,
@@ -362,6 +390,7 @@ async function runBridgeLocked({
       lastActivityAt: Date.now(),
       typingTicket: null,
       messageCount,
+      attachments,
     };
     activeTurn = turn;
     void beginTurnTyping(turn);
@@ -369,7 +398,12 @@ async function runBridgeLocked({
       projectId: binding.projectId,
       threadId: binding.threadId,
       messageCount,
+      attachmentCount: attachments.length,
     });
+    const input = [
+      ...(text ? [{ type: "text", text }] : []),
+      ...attachments.flatMap((attachment) => attachment.codexInputs),
+    ];
     const watchdogIntervalMs = Math.min(
       15_000,
       Math.max(1_000, Math.floor(settings.turnIdleTimeoutMs / 4)),
@@ -406,7 +440,7 @@ async function runBridgeLocked({
     void codex.runApprovalTurn({
       threadId: binding.threadId,
       cwd: binding.cwd,
-      text,
+      input,
       onStarted(started) {
         turn.turnId = started?.id || turn.turnId;
         turn.lastActivityAt = Date.now();
@@ -442,6 +476,7 @@ async function runBridgeLocked({
       clearInterval(turn.typingKeepalive);
       declineTurnApprovals(turn.turnId);
       await setTurnTyping(turn, false);
+      cleanupAttachments(turn.attachments);
       if (activeTurn === turn) activeTurn = null;
       scheduleDrain();
     });
@@ -517,19 +552,65 @@ async function runBridgeLocked({
             errorLog(`已忽略未授权微信用户: ${from || "(unknown)"}`);
             continue;
           }
-          const text = extractText(message);
-          if (!text) continue;
+          const inbound = inspectInboundMessage(message);
+          if (inbound.rejection) {
+            await deliver(from, contextToken, inbound.rejection);
+            appendAuditPrivate("attachment_rejected", {
+              messageKey: auditMessageKey(key),
+              projectId: binding.projectId,
+              threadId: binding.threadId,
+              reason: inbound.rejection,
+            });
+            continue;
+          }
+          const text = inbound.text;
+          if (!text && !inbound.attachment) continue;
 
-          log(`收到微信消息：id=${key || "(unknown)"} length=${text.length}`);
+          let preparedAttachment = null;
+          if (inbound.attachment) {
+            try {
+              preparedAttachment = await prepareInboundAttachment(
+                inbound.attachment,
+                { messageKey: key },
+              );
+              appendAuditPrivate("attachment_accepted", {
+                messageKey: auditMessageKey(key),
+                projectId: binding.projectId,
+                threadId: binding.threadId,
+                type: preparedAttachment.kind,
+                size: preparedAttachment.size,
+              });
+            } catch (error) {
+              errorLog(`微信附件已拒绝：${error.message}`);
+              appendAuditPrivate("attachment_rejected", {
+                messageKey: auditMessageKey(key),
+                projectId: binding.projectId,
+                threadId: binding.threadId,
+                reason: String(error.message || error).slice(0, 200),
+              });
+              await deliver(
+                from,
+                contextToken,
+                `附件未交给 Codex：${error.message}`,
+              );
+              continue;
+            }
+          }
+
+          log(
+            `收到微信消息：id=${key || "(unknown)"} length=${text.length}`
+            + (preparedAttachment ? ` attachment=${preparedAttachment.kind}` : ""),
+          );
           appendAuditPrivate("message_received", {
             messageKey: auditMessageKey(key),
             projectId: binding.projectId,
             threadId: binding.threadId,
             length: text.length,
+            attachmentType: preparedAttachment?.kind || null,
           });
           runtime.lastMessageAt = new Date().toISOString();
           saveRuntimeState(runtime);
-          const control = parseControlMessage(text);
+          const control = preparedAttachment ? null : parseControlMessage(text);
           if (control?.action === "accept" || control?.action === "decline") {
             const pending = pendingApprovals.get(control.code);
             const pendingSwitch = pendingSwitches.get(control.code);
@@ -637,7 +718,9 @@ async function runBridgeLocked({
           }
           if (control?.action === "clearQueue") {
             clearDrainTimer();
-            const cleared = messageQueue.clear();
+            const cleared = messageQueue.clear((item) => {
+              cleanupAttachments(item.attachments);
+            });
             await deliver(
               from,
               contextToken,
@@ -677,6 +760,7 @@ async function runBridgeLocked({
               [
                 status,
                 `队列：${messageQueue.length} 条消息（${messageQueue.batchCount} 批）`,
+                `排队附件：${messageQueue.attachmentCount} 个`,
                 `待确认：${pendingApprovals.size} 项`,
                 `项目：${binding.projectName || selectedProject.name}`,
                 `任务：${binding.threadName || "未命名任务"}`,
@@ -690,7 +774,7 @@ async function runBridgeLocked({
             );
             continue;
           }
-          const routing = parseRoutingMessage(text);
+          const routing = preparedAttachment ? null : parseRoutingMessage(text);
           if (routing?.action === "current") {
             const project = projectForBinding(registry, binding);
             const thread = await resolveCurrentThread();
@@ -797,10 +881,12 @@ async function runBridgeLocked({
             from,
             contextToken,
             text,
+            attachments: preparedAttachment ? [preparedAttachment] : [],
             projectId: binding.projectId,
             threadId: binding.threadId,
           });
           if (!activeTurn && queued.merged) clearDrainTimer();
+          scheduleDrain();
           await deliver(
             from,
             contextToken,
@@ -810,11 +896,13 @@ async function runBridgeLocked({
                 ? `已与刚才的消息合并，约 ${formatDuration(settings.batchWindowMs)}后开始处理。`
                 : [
                     "已收到，正在等待短消息合并后交给 Codex。",
+                    ...(preparedAttachment
+                      ? [`附件：${mediaSummary(preparedAttachment)}（只读）`]
+                      : []),
                     `项目：${binding.projectName || selectedProject.name}`,
                     `任务：${binding.threadName || "未命名任务"}`,
                   ].join("\n"),
           );
-          scheduleDrain();
         }
       } catch (error) {
         if (signal?.aborted) break;
@@ -840,7 +928,9 @@ async function runBridgeLocked({
     }
   } finally {
     clearDrainTimer();
-    messageQueue.clear();
+    messageQueue.clear((item) => {
+      cleanupAttachments(item.attachments);
+    });
     declineTurnApprovals(null, "cancel");
     for (const code of [...pendingSwitches.keys()]) finishSwitch(code);
     if (activeTurn?.turnId) {

@@ -77,9 +77,19 @@ export class MessageBatchQueue {
     return this.items.length;
   }
 
+  get attachmentCount() {
+    return this.items.reduce(
+      (total, item) => total + item.attachments.length,
+      0,
+    );
+  }
+
   enqueue(message, now = Date.now()) {
     const item = {
       ...message,
+      attachments: Array.isArray(message.attachments)
+        ? message.attachments
+        : [],
       receivedAt: now,
       messageCount: 1,
     };
@@ -87,7 +97,9 @@ export class MessageBatchQueue {
     const sameDestination = previous
       && previous.from === item.from
       && previous.projectId === item.projectId
-      && previous.threadId === item.threadId;
+      && previous.threadId === item.threadId
+      && previous.attachments.length === 0
+      && item.attachments.length === 0;
     if (
       sameDestination
       && now - previous.receivedAt <= this.batchWindowMs
@@ -112,8 +124,9 @@ export class MessageBatchQueue {
     return this.items.shift() || null;
   }
 
-  clear() {
+  clear(onItem = () => {}) {
     const count = this.length;
+    for (const item of this.items) onItem(item);
     this.items = [];
     return count;
   }

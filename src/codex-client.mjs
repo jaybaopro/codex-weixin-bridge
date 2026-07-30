@@ -274,6 +274,7 @@ export class CodexAppServer extends EventEmitter {
     threadId,
     cwd,
     text,
+    input,
     approvalPolicy = "never",
     resume = true,
     onActivity = () => {},
@@ -314,9 +315,18 @@ export class CodexAppServer extends EventEmitter {
     this.once("exit", onExit);
 
     try {
+      const turnInput = Array.isArray(input)
+        ? input
+        : [{ type: "text", text: String(text || "") }];
+      if (
+        turnInput.length === 0
+        || turnInput.some((item) => !item || typeof item.type !== "string")
+      ) {
+        throw new Error("Codex turn 输入为空或格式无效。");
+      }
       const started = await this.request("turn/start", {
         threadId,
-        input: [{ type: "text", text }],
+        input: turnInput,
         cwd,
         approvalPolicy,
         approvalsReviewer: "user",
