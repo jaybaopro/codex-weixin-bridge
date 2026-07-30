@@ -27,6 +27,7 @@ import {
   installBackgroundService,
   renderServiceDefinition,
   resolveServiceConfig,
+  restartBackgroundService,
   uninstallBackgroundService,
 } from "./service.mjs";
 import {
@@ -79,6 +80,7 @@ function printHelp() {
   codex-weixin-bridge service-render
   codex-weixin-bridge service-install
   codex-weixin-bridge service-status
+  codex-weixin-bridge service-restart
   codex-weixin-bridge service-uninstall
   codex-weixin-bridge check-update
   codex-weixin-bridge upgrade
@@ -135,7 +137,7 @@ async function withCodex(fn) {
   }
 }
 
-async function doctor() {
+async function doctor(options = {}) {
   const codexBin = resolveCodexBinary();
   const report = {
     version: BRIDGE_VERSION,
@@ -147,18 +149,42 @@ async function doctor() {
     stateDir: resolveStateDir(),
     credentials: Boolean(readJson("credentials.json")),
     binding: Boolean(readJson("binding.json")),
+    connection: readJson("runtime.json")?.connection || null,
   };
-  console.log(JSON.stringify(report, null, 2));
 
   await withCodex(async (client) => {
     const result = await client.listThreads({ limit: 1 });
-    console.log(`Codex App Server: OK（可见任务 ${result.data?.length ?? 0} 条，抽样上限 1）`);
+    report.codexAppServer = {
+      ok: true,
+      visibleThreadSampleCount: result.data?.length ?? 0,
+    };
     const binding = readJson("binding.json");
     if (binding?.cwd) {
       const isolation = await client.verifyIsolation({ cwd: binding.cwd });
-      console.log(`项目隔离: OK（${isolation.permissionProfile}，MCP ${isolation.mcpServerCount}）`);
+      report.isolation = { ok: true, ...isolation };
     }
   });
+  if (["darwin", "win32"].includes(process.platform)) {
+    const status = backgroundServiceStatus();
+    report.backgroundService = {
+      installed: status.installed,
+      running: status.running,
+      definitionPath: process.platform === "win32"
+        ? status.config.windowsRunnerPath
+        : status.config.plistPath,
+    };
+  }
+  console.log(JSON.stringify(report, null, 2));
+  if (!options.json) {
+    console.log(
+      `Codex App Server: OK（可见任务 ${report.codexAppServer.visibleThreadSampleCount} 条，抽样上限 1）`,
+    );
+    if (report.isolation) {
+      console.log(
+        `项目隔离: OK（${report.isolation.permissionProfile}，MCP ${report.isolation.mcpServerCount}）`,
+      );
+    }
+  }
 }
 
 async function threads(options) {
@@ -374,6 +400,13 @@ function uninstallService() {
     : "常驻服务未安装，未删除任何文件。");
 }
 
+function restartService() {
+  const config = restartBackgroundService();
+  console.log(`常驻服务已重启：${
+    process.platform === "win32" ? config.windowsTaskName : config.label
+  }`);
+}
+
 async function setup(options) {
   console.log(`\nCodex 微信直连一键配置向导 ${BRIDGE_VERSION}\n`);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -576,7 +609,7 @@ const { command, options } = parseArgs(process.argv.slice(2));
 try {
   switch (command) {
     case "doctor":
-      await doctor();
+      await doctor(options);
       break;
     case "version":
     case "--version":
@@ -618,6 +651,9 @@ try {
       break;
     case "service-status":
       printServiceStatus();
+      break;
+    case "service-restart":
+      restartService();
       break;
     case "service-uninstall":
       uninstallService();

@@ -276,6 +276,8 @@ export class CodexAppServer extends EventEmitter {
     text,
     approvalPolicy = "never",
     resume = true,
+    onActivity = () => {},
+    onStarted = () => {},
   }) {
     if (resume) {
       await this.resumeThread({ threadId, cwd, approvalPolicy });
@@ -286,14 +288,29 @@ export class CodexAppServer extends EventEmitter {
     const onDelta = (params) => {
       if (params?.threadId === threadId && typeof params.delta === "string") {
         deltas.push(params.delta);
+        onActivity({ type: "agent-delta", params });
       }
     };
     const onCompleted = (params) => {
-      if (params?.threadId === threadId) completion.resolve(params.turn);
+      if (params?.threadId === threadId) {
+        onActivity({ type: "turn-completed", params });
+        completion.resolve(params.turn);
+      }
+    };
+    const onNotification = (message) => {
+      const params = message?.params;
+      if (
+        params?.threadId === threadId
+        || params?.turn?.threadId === threadId
+        || params?.thread?.id === threadId
+      ) {
+        onActivity({ type: message.method || "notification", params });
+      }
     };
     const onExit = (error) => completion.reject(error);
     this.on("item/agentMessage/delta", onDelta);
     this.on("turn/completed", onCompleted);
+    this.on("notification", onNotification);
     this.once("exit", onExit);
 
     try {
@@ -304,6 +321,8 @@ export class CodexAppServer extends EventEmitter {
         approvalPolicy,
         approvalsReviewer: "user",
       });
+      onStarted(started?.turn || null);
+      onActivity({ type: "turn-started", params: started });
       const turn = await completion.promise;
       if (turn?.id && started?.turn?.id && turn.id !== started.turn.id) {
         throw new Error(`收到不匹配的 turn/completed: ${turn.id}`);
@@ -325,6 +344,7 @@ export class CodexAppServer extends EventEmitter {
     } finally {
       this.off("item/agentMessage/delta", onDelta);
       this.off("turn/completed", onCompleted);
+      this.off("notification", onNotification);
       this.off("exit", onExit);
     }
   }

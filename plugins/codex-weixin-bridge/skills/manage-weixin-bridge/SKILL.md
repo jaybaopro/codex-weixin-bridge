@@ -35,9 +35,11 @@ project-scoped security boundary.
 1. Run `codex-weixin-bridge doctor`.
 2. Run `codex-weixin-bridge service-status` when the user asks about the
    background process.
-3. Inspect only redacted logs from `~/.codex-weixin-direct/`; do not expose
+3. Use `codex-weixin-bridge doctor --json` when a machine-readable redacted
+   diagnostic report is useful.
+4. Inspect only redacted logs from `~/.codex-weixin-direct/`; do not expose
    credentials or message content.
-4. Report the failing layer separately: CLI, Codex App Server, project isolation,
+5. Report the failing layer separately: CLI, Codex App Server, project isolation,
    Weixin authorization, binding, or LaunchAgent.
 
 ### Install the CLI from a checked-out private repository
@@ -100,6 +102,8 @@ project-scoped security boundary.
 - Preview with `codex-weixin-bridge service-render`.
 - After confirmation, install with `codex-weixin-bridge service-install`.
 - Verify with `codex-weixin-bridge service-status`.
+- Restart an installed service with `codex-weixin-bridge service-restart`; do
+  not uninstall and reinstall merely to restart it.
 - Remove only after confirmation with
   `codex-weixin-bridge service-uninstall`.
 - macOS uses LaunchAgent; Windows uses a per-user Task Scheduler task.

@@ -27,11 +27,21 @@ import {
   writeJsonPrivate,
 } from "./state.mjs";
 import {
+  formatDuration,
+  formatLocalTime,
+  MessageBatchQueue,
+  retryDelayMs,
+  runtimeSettings,
+} from "./runtime-control.mjs";
+import {
   extractText,
   getUpdates,
+  isSessionExpiredResponse,
   sendText,
+  setTyping,
   splitMessage,
 } from "./weixin-api.mjs";
+import { BRIDGE_VERSION } from "./version.mjs";
 
 function messageKey(message) {
   return String(message?.message_id || message?.client_id || "");
@@ -62,6 +72,19 @@ async function sendChunks(credentials, target, contextToken, text) {
   }
 }
 
+function waitForDelay(milliseconds, signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, milliseconds);
+    function done() {
+      signal?.removeEventListener("abort", done);
+      clearTimeout(timer);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
 async function runBridgeLocked({
   signal,
   log = console.log,
@@ -76,6 +99,10 @@ async function runBridgeLocked({
   let selectedProject = projectForBinding(registry, binding);
   const runtime = loadRuntimeState();
   const seen = new Set(runtime.recentMessageIds);
+  const settings = runtimeSettings();
+  const messageQueue = new MessageBatchQueue({
+    batchWindowMs: settings.batchWindowMs,
+  });
   const codex = await new CodexAppServer({ stderr: process.stderr }).start();
   const isolation = await codex.verifyIsolation({ cwd: binding.cwd });
   const pendingApprovals = new Map();
@@ -83,6 +110,10 @@ async function runBridgeLocked({
   const itemChanges = new Map();
   let taskSnapshot = null;
   let activeTurn = null;
+  let drainTimer = null;
+  let connectionFailures = 0;
+  let longPollTimeoutMs = 40_000;
+  const serviceStartedAt = Date.now();
 
   log(`微信直连已启动：${binding.cwd}`);
   log(`Codex task: ${binding.threadId}`);
@@ -94,10 +125,15 @@ async function runBridgeLocked({
     permissionProfile: isolation.permissionProfile,
   });
 
+  const deliver = async (target, contextToken, text) => {
+    await sendChunks(credentials, target, contextToken, text);
+    runtime.lastReplyAt = new Date().toISOString();
+    saveRuntimeState(runtime);
+  };
+
   const sendToActive = async (text) => {
     if (!activeTurn) return;
-    await sendChunks(
-      credentials,
+    await deliver(
       activeTurn.from,
       activeTurn.contextToken,
       text,
@@ -162,8 +198,7 @@ async function runBridgeLocked({
       threads,
       expiresAt: Date.now() + TASK_SNAPSHOT_TTL_MS,
     };
-    await sendChunks(
-      credentials,
+    await deliver(
       from,
       contextToken,
       formatTaskList(project, threads, binding.threadId),
@@ -199,7 +234,7 @@ async function runBridgeLocked({
   });
   codex.on("serverRequest", (request) => {
     void (async () => {
-      if (!activeTurn) {
+      if (!activeTurn || activeTurn.cancelled) {
         if ([
           "item/fileChange/requestApproval",
           "item/commandExecution/requestApproval",
@@ -216,6 +251,7 @@ async function runBridgeLocked({
       }
       if (activeTurn && request.params?.turnId) {
         activeTurn.turnId = request.params.turnId;
+        activeTurn.lastActivityAt = Date.now();
       }
       const changes = itemChanges.get(request.params?.itemId) || [];
       const assessment = assessApprovalRequest({ request, binding, changes });
@@ -274,25 +310,113 @@ async function runBridgeLocked({
     });
   });
 
-  const startTurn = ({ from, contextToken, text }) => {
+  const setTurnTyping = async (turn, active) => {
+    try {
+      turn.typingTicket = await setTyping(credentials, {
+        userId: turn.from,
+        contextToken: turn.contextToken,
+        typingTicket: turn.typingTicket,
+        active,
+      });
+    } catch (error) {
+      errorLog(`微信输入状态更新失败（不影响任务）：${error.message}`);
+    }
+  };
+
+  const beginTurnTyping = async (turn) => {
+    await setTurnTyping(turn, true);
+    if (activeTurn !== turn || turn.cancelled || !turn.typingTicket) return;
+    turn.typingKeepalive = setInterval(() => {
+      void setTurnTyping(turn, true);
+    }, 5_000);
+    turn.typingKeepalive.unref?.();
+  };
+
+  const clearDrainTimer = () => {
+    if (!drainTimer) return;
+    clearTimeout(drainTimer);
+    drainTimer = null;
+  };
+
+  let startTurn;
+  const scheduleDrain = () => {
+    if (activeTurn || drainTimer || messageQueue.batchCount === 0) return;
+    const delay = messageQueue.readyInMs() ?? 0;
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      const next = messageQueue.shift();
+      if (!next) return;
+      startTurn(next);
+    }, delay);
+    drainTimer.unref?.();
+  };
+
+  startTurn = ({ from, contextToken, text, messageCount = 1 }) => {
     const turn = {
       from,
       contextToken,
       turnId: null,
       cancelled: false,
+      timedOut: false,
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
+      typingTicket: null,
+      messageCount,
     };
     activeTurn = turn;
+    void beginTurnTyping(turn);
     appendAuditPrivate("turn_start", {
       projectId: binding.projectId,
       threadId: binding.threadId,
+      messageCount,
     });
+    const watchdogIntervalMs = Math.min(
+      15_000,
+      Math.max(1_000, Math.floor(settings.turnIdleTimeoutMs / 4)),
+    );
+    turn.watchdog = setInterval(() => {
+      if (
+        activeTurn !== turn
+        || turn.cancelled
+        || Date.now() - turn.lastActivityAt < settings.turnIdleTimeoutMs
+      ) {
+        return;
+      }
+      turn.cancelled = true;
+      turn.timedOut = true;
+      declineTurnApprovals(turn.turnId, "cancel");
+      appendAuditPrivate("turn_watchdog_timeout", {
+        projectId: binding.projectId,
+        threadId: binding.threadId,
+        idleTimeoutMs: settings.turnIdleTimeoutMs,
+      });
+      if (turn.turnId) {
+        void codex.interruptTurn({
+          threadId: binding.threadId,
+          turnId: turn.turnId,
+        }).catch(errorLog);
+      }
+      void deliver(
+        from,
+        contextToken,
+        `Codex 已连续 ${formatDuration(settings.turnIdleTimeoutMs)}没有进展，任务已自动中断。后续排队消息仍会继续处理。`,
+      ).catch(errorLog);
+    }, watchdogIntervalMs);
+    turn.watchdog.unref?.();
     void codex.runApprovalTurn({
       threadId: binding.threadId,
       cwd: binding.cwd,
       text,
+      onStarted(started) {
+        turn.turnId = started?.id || turn.turnId;
+        turn.lastActivityAt = Date.now();
+      },
+      onActivity() {
+        turn.lastActivityAt = Date.now();
+      },
     }).then(async (reply) => {
       if (!turn.cancelled) {
-        await sendChunks(credentials, from, contextToken, reply);
+        await deliver(from, contextToken, reply);
         log("Codex 回复已发送到微信。");
         appendAuditPrivate("turn_completed", {
           projectId: binding.projectId,
@@ -307,16 +431,19 @@ async function runBridgeLocked({
         error: error.message.slice(0, 300),
       });
       if (!turn.cancelled) {
-        await sendChunks(
-          credentials,
+        await deliver(
           from,
           contextToken,
           `Codex 处理失败：${error.message}`,
         );
       }
-    }).finally(() => {
+    }).finally(async () => {
+      clearInterval(turn.watchdog);
+      clearInterval(turn.typingKeepalive);
       declineTurnApprovals(turn.turnId);
+      await setTurnTyping(turn, false);
       if (activeTurn === turn) activeTurn = null;
+      scheduleDrain();
     });
   };
 
@@ -336,7 +463,21 @@ async function runBridgeLocked({
 
     while (!signal?.aborted) {
       try {
-        const response = await getUpdates(credentials, runtime.cursor);
+        const response = await getUpdates(
+          credentials,
+          runtime.cursor,
+          longPollTimeoutMs,
+        );
+        if (isSessionExpiredResponse(response)) {
+          runtime.connection = {
+            state: "authorization-expired",
+            failureCount: connectionFailures,
+            lastErrorAt: new Date().toISOString(),
+            lastError: "微信授权已失效，需要重新扫码",
+          };
+          saveRuntimeState(runtime);
+          throw new Error("微信授权已失效（errcode=-14），请在电脑运行 login 后再运行 service-restart。");
+        }
         if (response.get_updates_buf) {
           runtime.cursor = response.get_updates_buf;
           saveRuntimeState(runtime);
@@ -346,6 +487,18 @@ async function runBridgeLocked({
             `微信 getUpdates 失败: ret=${response.ret} errcode=${response.errcode} ${response.errmsg || ""}`,
           );
         }
+        connectionFailures = 0;
+        const suggestedTimeout = Number(response.longpolling_timeout_ms);
+        if (Number.isFinite(suggestedTimeout) && suggestedTimeout >= 5_000) {
+          longPollTimeoutMs = Math.min(120_000, suggestedTimeout + 5_000);
+        }
+        runtime.lastPollAt = new Date().toISOString();
+        runtime.connection = {
+          state: "connected",
+          failureCount: 0,
+          lastSuccessAt: runtime.lastPollAt,
+        };
+        saveRuntimeState(runtime);
 
         for (const message of response.msgs || []) {
           const key = messageKey(message);
@@ -374,17 +527,19 @@ async function runBridgeLocked({
             threadId: binding.threadId,
             length: text.length,
           });
+          runtime.lastMessageAt = new Date().toISOString();
+          saveRuntimeState(runtime);
           const control = parseControlMessage(text);
           if (control?.action === "accept" || control?.action === "decline") {
             const pending = pendingApprovals.get(control.code);
             const pendingSwitch = pendingSwitches.get(control.code);
             if (!pending && !pendingSwitch) {
-              await sendChunks(credentials, from, contextToken, "审批码不存在、已使用或已过期。");
+              await deliver(from, contextToken, "审批码不存在、已使用或已过期。");
               continue;
             }
             if (pending && pending.expiresAt <= Date.now()) {
               finishApproval(control.code, "decline");
-              await sendChunks(credentials, from, contextToken, "审批码已过期，请等待新的请求。");
+              await deliver(from, contextToken, "审批码已过期，请等待新的请求。");
               continue;
             }
             if (pending) {
@@ -392,8 +547,7 @@ async function runBridgeLocked({
                 control.code,
                 control.action === "accept" ? "accept" : "decline",
               );
-              await sendChunks(
-                credentials,
+              await deliver(
                 from,
                 contextToken,
                 control.action === "accept"
@@ -405,23 +559,23 @@ async function runBridgeLocked({
 
             if (pendingSwitch.expiresAt <= Date.now()) {
               finishSwitch(control.code);
-              await sendChunks(credentials, from, contextToken, "切换确认码已过期，请重新查看任务列表。");
+              await deliver(from, contextToken, "切换确认码已过期，请重新查看任务列表。");
               continue;
             }
             const switchRequest = finishSwitch(control.code);
             if (control.action === "decline") {
-              await sendChunks(credentials, from, contextToken, "已取消任务切换。");
+              await deliver(from, contextToken, "已取消任务切换。");
               continue;
             }
-            if (activeTurn || pendingApprovals.size) {
-              await sendChunks(credentials, from, contextToken, "当前任务正在运行或等待审批，不能切换。");
+            if (activeTurn || messageQueue.length || pendingApprovals.size) {
+              await deliver(from, contextToken, "当前任务正在运行、排队或等待审批，不能切换。");
               continue;
             }
             const project = projects.find(
               (candidate) => candidate.id === switchRequest.projectId,
             );
             if (!project) {
-              await sendChunks(credentials, from, contextToken, "目标项目已不在白名单中，切换已取消。");
+              await deliver(from, contextToken, "目标项目已不在白名单中，切换已取消。");
               continue;
             }
             const freshThreads = await listProjectThreads(project, 100);
@@ -429,7 +583,7 @@ async function runBridgeLocked({
               (candidate) => candidate.id === switchRequest.threadId,
             );
             if (!thread) {
-              await sendChunks(credentials, from, contextToken, "目标任务已不存在或不属于该项目，切换已取消。");
+              await deliver(from, contextToken, "目标任务已不存在或不属于该项目，切换已取消。");
               continue;
             }
             const nextBinding = {
@@ -452,8 +606,7 @@ async function runBridgeLocked({
               projectId: project.id,
               threadId: thread.id,
             });
-            await sendChunks(
-              credentials,
+            await deliver(
               from,
               contextToken,
               `已切换。\n项目：${project.name}\n任务：${thread.name || "未命名任务"}\n下一条普通消息将进入这个任务。`,
@@ -462,7 +615,13 @@ async function runBridgeLocked({
           }
           if (control?.action === "cancel") {
             if (!activeTurn) {
-              await sendChunks(credentials, from, contextToken, "当前没有正在运行的任务。");
+              await deliver(
+                from,
+                contextToken,
+                messageQueue.length
+                  ? `当前没有正在运行的任务，但队列中还有 ${messageQueue.length} 条消息。若不再需要，请发送“清空队列”。`
+                  : "当前没有正在运行的任务。",
+              );
               continue;
             }
             activeTurn.cancelled = true;
@@ -473,22 +632,60 @@ async function runBridgeLocked({
                 turnId: activeTurn.turnId,
               });
             }
-            await sendChunks(credentials, from, contextToken, "已取消当前 Codex 任务。");
+            await deliver(from, contextToken, "已取消当前 Codex 任务；排队消息不受影响。");
+            continue;
+          }
+          if (control?.action === "clearQueue") {
+            clearDrainTimer();
+            const cleared = messageQueue.clear();
+            await deliver(
+              from,
+              contextToken,
+              cleared
+                ? `已清空 ${cleared} 条排队消息；当前正在运行的任务不受影响。`
+                : "队列本来就是空的。",
+            );
+            continue;
+          }
+          if (control?.action === "reconnect") {
+            connectionFailures = 0;
+            runtime.connection = {
+              state: "connected",
+              failureCount: 0,
+              lastSuccessAt: runtime.lastPollAt || new Date().toISOString(),
+            };
+            saveRuntimeState(runtime);
+            await deliver(
+              from,
+              contextToken,
+              "已刷新微信连接状态。当前消息通道可用；若电脑端服务异常，请运行 service-restart。",
+            );
             continue;
           }
           if (control?.action === "status") {
             const status = activeTurn
-              ? `任务正在运行；待确认请求 ${pendingApprovals.size} 项。`
+              ? `任务正在运行 ${formatDuration(Date.now() - activeTurn.startedAt)}。`
               : "当前空闲，没有正在运行的任务。";
-            await sendChunks(
-              credentials,
+            const connectionLabels = {
+              connected: "正常",
+              retrying: `正在重连（连续失败 ${runtime.connection?.failureCount || 0} 次）`,
+              "authorization-expired": "微信授权已失效，需要在电脑重新扫码",
+            };
+            await deliver(
               from,
               contextToken,
               [
                 status,
+                `队列：${messageQueue.length} 条消息（${messageQueue.batchCount} 批）`,
+                `待确认：${pendingApprovals.size} 项`,
                 `项目：${binding.projectName || selectedProject.name}`,
                 `任务：${binding.threadName || "未命名任务"}`,
                 "读取边界：仅当前绑定项目",
+                `连接：${connectionLabels[runtime.connection?.state] || "初始化中"}`,
+                `最近收取：${formatLocalTime(runtime.lastPollAt)}`,
+                `最近回复：${formatLocalTime(runtime.lastReplyAt)}`,
+                `服务运行：${formatDuration(Date.now() - serviceStartedAt)}`,
+                `版本：${BRIDGE_VERSION}`,
               ].join("\n"),
             );
             continue;
@@ -497,8 +694,7 @@ async function runBridgeLocked({
           if (routing?.action === "current") {
             const project = projectForBinding(registry, binding);
             const thread = await resolveCurrentThread();
-            await sendChunks(
-              credentials,
+            await deliver(
               from,
               contextToken,
               formatCurrentBinding({
@@ -511,22 +707,20 @@ async function runBridgeLocked({
             continue;
           }
           if (routing?.action === "help") {
-            await sendChunks(credentials, from, contextToken, routingHelp());
+            await deliver(from, contextToken, routingHelp());
             continue;
           }
-          if (routing && activeTurn) {
-            await sendChunks(
-              credentials,
+          if (routing && (activeTurn || messageQueue.length)) {
+            await deliver(
               from,
               contextToken,
-              "当前任务正在运行，暂不能浏览或切换其他任务。可发送“当前任务”或“取消任务”。",
+              `当前任务正在运行或排队（队列 ${messageQueue.length} 条），暂不能浏览或切换其他任务。可发送“状态”“取消任务”或“清空队列”。`,
             );
             continue;
           }
           if (routing?.action === "projects") {
             const currentProject = projectForBinding(registry, binding);
-            await sendChunks(
-              credentials,
+            await deliver(
               from,
               contextToken,
               formatProjectList(projects, currentProject.id),
@@ -536,7 +730,7 @@ async function runBridgeLocked({
           if (routing?.action === "selectProject") {
             const project = projects[routing.index - 1];
             if (!project) {
-              await sendChunks(credentials, from, contextToken, "项目编号无效，请先发送“项目列表”。");
+              await deliver(from, contextToken, "项目编号无效，请先发送“项目列表”。");
               continue;
             }
             selectedProject = project;
@@ -550,7 +744,7 @@ async function runBridgeLocked({
           if (routing?.action === "requestSwitch") {
             if (!taskSnapshot || taskSnapshot.expiresAt <= Date.now()) {
               taskSnapshot = null;
-              await sendChunks(credentials, from, contextToken, "任务编号已失效，请重新发送“任务列表”。");
+              await deliver(from, contextToken, "任务编号已失效，请重新发送“任务列表”。");
               continue;
             }
             const thread = taskSnapshot.threads[routing.index - 1];
@@ -558,11 +752,11 @@ async function runBridgeLocked({
               (candidate) => candidate.id === taskSnapshot.projectId,
             );
             if (!thread || !project) {
-              await sendChunks(credentials, from, contextToken, "任务编号无效，请重新发送“任务列表”。");
+              await deliver(from, contextToken, "任务编号无效，请重新发送“任务列表”。");
               continue;
             }
             if (thread.id === binding.threadId && project.cwd === binding.cwd) {
-              await sendChunks(credentials, from, contextToken, "这已经是当前绑定任务。");
+              await deliver(from, contextToken, "这已经是当前绑定任务。");
               continue;
             }
             for (const code of [...pendingSwitches.keys()]) finishSwitch(code);
@@ -571,8 +765,7 @@ async function runBridgeLocked({
             const timer = setTimeout(() => {
               const expired = finishSwitch(code);
               if (!expired) return;
-              void sendChunks(
-                credentials,
+              void deliver(
                 from,
                 contextToken,
                 "任务切换确认码已过期，未发生切换。",
@@ -585,8 +778,7 @@ async function runBridgeLocked({
               expiresAt,
               timer,
             });
-            await sendChunks(
-              credentials,
+            await deliver(
               from,
               contextToken,
               [
@@ -601,34 +793,54 @@ async function runBridgeLocked({
             );
             continue;
           }
-          if (activeTurn) {
-            await sendChunks(
-              credentials,
-              from,
-              contextToken,
-              `上一项任务仍在运行（待确认 ${pendingApprovals.size} 项）。可回复“状态”查看，或回复“取消任务”。`,
-            );
-            continue;
-          }
-          await sendChunks(
-            credentials,
+          const queued = messageQueue.enqueue({
             from,
             contextToken,
-            [
-              "已收到，正在交给绑定的 Codex 任务处理。",
-              `项目：${binding.projectName || selectedProject.name}`,
-              `任务：${binding.threadName || "未命名任务"}`,
-            ].join("\n"),
+            text,
+            projectId: binding.projectId,
+            threadId: binding.threadId,
+          });
+          if (!activeTurn && queued.merged) clearDrainTimer();
+          await deliver(
+            from,
+            contextToken,
+            activeTurn
+              ? `已加入队列：前方还有 ${Math.max(0, messageQueue.batchCount - 1)} 批，当前队列共 ${messageQueue.length} 条消息。`
+              : queued.merged
+                ? `已与刚才的消息合并，约 ${formatDuration(settings.batchWindowMs)}后开始处理。`
+                : [
+                    "已收到，正在等待短消息合并后交给 Codex。",
+                    `项目：${binding.projectName || selectedProject.name}`,
+                    `任务：${binding.threadName || "未命名任务"}`,
+                  ].join("\n"),
           );
-          startTurn({ from, contextToken, text });
+          scheduleDrain();
         }
       } catch (error) {
         if (signal?.aborted) break;
-        errorLog(error);
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        connectionFailures += 1;
+        const authorizationExpired = /errcode=-14|授权已失效/.test(error.message);
+        const delay = authorizationExpired
+          ? Math.max(settings.retryMaxMs, 5 * 60_000)
+          : retryDelayMs(connectionFailures, {
+            baseMs: settings.retryBaseMs,
+            maxMs: settings.retryMaxMs,
+          });
+        runtime.connection = {
+          state: authorizationExpired ? "authorization-expired" : "retrying",
+          failureCount: connectionFailures,
+          lastErrorAt: new Date().toISOString(),
+          lastError: String(error.message || error).slice(0, 300),
+          nextRetryAt: new Date(Date.now() + delay).toISOString(),
+        };
+        saveRuntimeState(runtime);
+        errorLog(`${error.message}；${formatDuration(delay)}后重试。`);
+        await waitForDelay(delay, signal);
       }
     }
   } finally {
+    clearDrainTimer();
+    messageQueue.clear();
     declineTurnApprovals(null, "cancel");
     for (const code of [...pendingSwitches.keys()]) finishSwitch(code);
     if (activeTurn?.turnId) {

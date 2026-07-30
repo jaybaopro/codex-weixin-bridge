@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveCodexBinary } from "./codex-client.mjs";
+import { runtimeSettings } from "./runtime-control.mjs";
 import { hardenPrivatePath, resolveStateDir } from "./state.mjs";
 
 export const DEFAULT_SERVICE_LABEL = "com.codex.weixin.bridge";
@@ -21,6 +22,30 @@ function xmlEscape(value) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function detectInstalledLaunchAgentLabel(launchAgentsDir, cliPath) {
+  try {
+    const defaultPath = path.join(
+      launchAgentsDir,
+      `${DEFAULT_SERVICE_LABEL}.plist`,
+    );
+    if (fs.existsSync(defaultPath)) return DEFAULT_SERVICE_LABEL;
+    const cliMarker = `<string>${xmlEscape(cliPath)}</string>`;
+    for (const entry of fs.readdirSync(launchAgentsDir)) {
+      if (!entry.endsWith(".plist")) continue;
+      const candidate = path.join(launchAgentsDir, entry);
+      const content = fs.readFileSync(candidate, "utf8");
+      if (!content.includes(cliMarker) || !content.includes("<string>serve</string>")) {
+        continue;
+      }
+      const label = entry.slice(0, -".plist".length);
+      if (/^[A-Za-z0-9.-]+$/.test(label)) return label;
+    }
+  } catch {
+    // Missing or unreadable LaunchAgents directories simply use the default.
+  }
+  return DEFAULT_SERVICE_LABEL;
 }
 
 function assertMacOS() {
@@ -50,14 +75,19 @@ export function resolveServiceConfig(overrides = {}) {
   );
   const nodePath = path.resolve(overrides.nodePath || process.execPath);
   const codexBin = path.resolve(overrides.codexBin || resolveCodexBinary());
+  const launchAgentsDir = path.join(homeDir, "Library", "LaunchAgents");
   const label = overrides.label
     || process.env.CODEX_WEIXIN_SERVICE_LABEL
-    || DEFAULT_SERVICE_LABEL;
+    || (
+      platform === "darwin"
+        ? detectInstalledLaunchAgentLabel(launchAgentsDir, cliPath)
+        : DEFAULT_SERVICE_LABEL
+    );
   if (!/^[A-Za-z0-9.-]+$/.test(label)) {
     throw new Error(`无效的 LaunchAgent 服务名称：${label}`);
   }
+  const settings = runtimeSettings(overrides.env || process.env);
 
-  const launchAgentsDir = path.join(homeDir, "Library", "LaunchAgents");
   return {
     platform,
     label,
@@ -75,6 +105,10 @@ export function resolveServiceConfig(overrides = {}) {
       || process.env.CODEX_WEIXIN_WINDOWS_TASK_NAME
       || DEFAULT_WINDOWS_TASK_NAME,
     windowsRunnerPath: path.join(stateDir, "run-bridge.cmd"),
+    batchWindowMs: settings.batchWindowMs,
+    turnIdleTimeoutMs: settings.turnIdleTimeoutMs,
+    retryBaseMs: settings.retryBaseMs,
+    retryMaxMs: settings.retryMaxMs,
     pathValue: unique([
       path.dirname(nodePath),
       path.join(homeDir, ".local", "bin"),
@@ -118,6 +152,14 @@ export function renderLaunchAgentPlist(config = resolveServiceConfig()) {
     <string>${value.stateDir}</string>
     <key>NO_COLOR</key>
     <string>1</string>
+    <key>CODEX_WEIXIN_BATCH_WINDOW_MS</key>
+    <string>${value.batchWindowMs}</string>
+    <key>CODEX_WEIXIN_TURN_IDLE_TIMEOUT_MS</key>
+    <string>${value.turnIdleTimeoutMs}</string>
+    <key>CODEX_WEIXIN_RETRY_BASE_MS</key>
+    <string>${value.retryBaseMs}</string>
+    <key>CODEX_WEIXIN_RETRY_MAX_MS</key>
+    <string>${value.retryMaxMs}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -153,6 +195,10 @@ export function renderWindowsRunnerCmd(config = resolveServiceConfig()) {
     `set "HOME=${cmdValue(config.homeDir)}"`,
     `set "CODEX_WEIXIN_CODEX_BIN=${cmdValue(config.codexBin)}"`,
     `set "CODEX_WEIXIN_STATE_DIR=${cmdValue(config.stateDir)}"`,
+    `set "CODEX_WEIXIN_BATCH_WINDOW_MS=${cmdValue(config.batchWindowMs)}"`,
+    `set "CODEX_WEIXIN_TURN_IDLE_TIMEOUT_MS=${cmdValue(config.turnIdleTimeoutMs)}"`,
+    `set "CODEX_WEIXIN_RETRY_BASE_MS=${cmdValue(config.retryBaseMs)}"`,
+    `set "CODEX_WEIXIN_RETRY_MAX_MS=${cmdValue(config.retryMaxMs)}"`,
     "set \"NO_COLOR=1\"",
     `cd /d "${cmdValue(config.workingDirectory)}"`,
     `"${cmdValue(config.nodePath)}" "${cmdValue(config.cliPath)}" serve >>"${cmdValue(config.serviceLog)}" 2>>"${cmdValue(config.serviceErrorLog)}"`,
@@ -179,7 +225,14 @@ export function installLaunchAgent(config = resolveServiceConfig()) {
     allowFailure: true,
   });
   runLaunchctl(["enable", `${config.launchDomain}/${config.label}`]);
-  runLaunchctl(["bootstrap", config.launchDomain, config.plistPath]);
+  const firstBootstrap = runLaunchctl(
+    ["bootstrap", config.launchDomain, config.plistPath],
+    { allowFailure: true },
+  );
+  if (firstBootstrap.status !== 0) {
+    spawnSync("/bin/sleep", ["1"], { stdio: "ignore" });
+    runLaunchctl(["bootstrap", config.launchDomain, config.plistPath]);
+  }
   runLaunchctl(["kickstart", "-k", `${config.launchDomain}/${config.label}`]);
   return config;
 }
@@ -209,6 +262,15 @@ export function uninstallLaunchAgent(config = resolveServiceConfig()) {
     removed = true;
   }
   return { removed, config };
+}
+
+export function restartLaunchAgent(config = resolveServiceConfig()) {
+  assertMacOS();
+  if (!fs.existsSync(config.plistPath)) {
+    throw new Error("LaunchAgent 尚未安装，请先运行 service-install。");
+  }
+  runLaunchctl(["kickstart", "-k", `${config.launchDomain}/${config.label}`]);
+  return config;
 }
 
 function assertWindows() {
@@ -288,6 +350,17 @@ export function uninstallWindowsTask(config = resolveServiceConfig()) {
   return { removed, config };
 }
 
+export function restartWindowsTask(config = resolveServiceConfig()) {
+  assertWindows();
+  const status = windowsTaskStatus(config);
+  if (!status.installed) {
+    throw new Error("Windows 计划任务尚未安装，请先运行 service-install。");
+  }
+  runSchtasks(["/End", "/TN", config.windowsTaskName], { allowFailure: true });
+  runSchtasks(["/Run", "/TN", config.windowsTaskName]);
+  return config;
+}
+
 export function renderServiceDefinition(config = resolveServiceConfig()) {
   if (config.platform === "darwin") return renderLaunchAgentPlist(config);
   if (config.platform === "win32") return renderWindowsRunnerCmd(config);
@@ -309,5 +382,11 @@ export function backgroundServiceStatus(config = resolveServiceConfig()) {
 export function uninstallBackgroundService(config = resolveServiceConfig()) {
   if (process.platform === "darwin") return uninstallLaunchAgent(config);
   if (process.platform === "win32") return uninstallWindowsTask(config);
+  throw new Error("常驻服务目前支持 macOS 和 Windows。");
+}
+
+export function restartBackgroundService(config = resolveServiceConfig()) {
+  if (process.platform === "darwin") return restartLaunchAgent(config);
+  if (process.platform === "win32") return restartWindowsTask(config);
   throw new Error("常驻服务目前支持 macOS 和 Windows。");
 }

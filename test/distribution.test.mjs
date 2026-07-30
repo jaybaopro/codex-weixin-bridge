@@ -23,7 +23,7 @@ function readJson(relativePath) {
 
 test("distribution package exposes a global CLI and direct QR dependency", () => {
   const pkg = readJson("package.json");
-  assert.equal(pkg.version, "0.5.0");
+  assert.equal(pkg.version, "0.5.1");
   assert.equal(pkg.private, true);
   assert.equal(pkg.bin["codex-weixin-bridge"], "./src/cli.mjs");
   assert.equal(pkg.dependencies["qrcode-terminal"], "0.12.0");
@@ -43,6 +43,8 @@ test("LaunchAgent rendering uses the installing user's paths", () => {
   assert.match(plist, /com\.example\.codex-weixin/);
   assert.match(plist, /example/);
   assert.match(plist, /codex-weixin-bridge/);
+  assert.match(plist, /CODEX_WEIXIN_TURN_IDLE_TIMEOUT_MS/);
+  assert.match(plist, />600000</);
   assert.doesNotMatch(plist, /jay\.bao/);
 });
 
@@ -57,6 +59,7 @@ test("Windows runner uses a per-user state directory and no developer path", () 
   });
   const runner = renderWindowsRunnerCmd(config);
   assert.match(runner, /CODEX_WEIXIN_STATE_DIR/);
+  assert.match(runner, /CODEX_WEIXIN_BATCH_WINDOW_MS=2500/);
   assert.match(runner, /cli\.mjs" serve/);
   assert.doesNotMatch(runner, /jay\.bao/);
 });
@@ -112,7 +115,7 @@ test("repo marketplace points to the self-hosted management plugin", () => {
     "plugins/codex-weixin-bridge/.codex-plugin/plugin.json",
   );
   assert.equal(manifest.name, "codex-weixin-bridge");
-  assert.equal(manifest.version, "0.5.0");
+  assert.equal(manifest.version, "0.5.1");
   assert.equal(manifest.skills, "./skills/");
 });
 

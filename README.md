@@ -1,6 +1,6 @@
 # 微信直连 Codex 桥接器
 
-团队内测版 `0.5.0`：让每位同事在自己的 Mac 或 Windows 电脑上，通过自己的微信 ClawBot
+团队内测版 `0.5.1`：让每位同事在自己的 Mac 或 Windows 电脑上，通过自己的微信 ClawBot
 继续自己的 Codex 项目任务。
 
 代码通过公开 GitHub 仓库分发，不需要提交到 Codex 官方插件目录。
@@ -24,6 +24,8 @@ OpenClaw Gateway。
 - 单实例锁会阻止两个桥接进程同时写同一任务。
 - Codex App Server 使用本机 `stdio`，不监听网络端口。
 - 日志和审计元数据不记录微信消息正文。
+- 普通消息可以排队和短窗口合并，但每一批仍顺序进入同一个绑定任务；审批不会合并。
+- 微信只显示输入状态和有限运行状态，不发送 Codex 隐藏推理、工具参数或原始工具输出。
 
 当前版本按“一位同事、一台电脑、一个微信授权身份、一个状态目录”设计。不要让
 多位同事共用同一个桥接实例。
@@ -170,6 +172,12 @@ codex-weixin-bridge service-install
 codex-weixin-bridge service-status
 ```
 
+重启已安装的服务：
+
+```bash
+codex-weixin-bridge service-restart
+```
+
 停止并移除常驻服务：
 
 ```bash
@@ -240,16 +248,29 @@ codex-weixin-bridge logout
 
 ```text
 当前任务
+状态
 项目列表
 项目 1
 任务列表
 切换 3
 取消任务
+清空队列
+重连
 帮助
 ```
 
 项目和任务只显示短编号。执行切换后仍需回复一次性确认码；有任务正在运行或等待
-审批时禁止切换。微信侧不能提交完整任务 ID 或任意项目路径。
+审批、短消息合并或排队时禁止切换。微信侧不能提交完整任务 ID 或任意项目路径。
+
+普通消息会先等待约 2.5 秒，以便合并连续发送的短句。Codex 忙碌时，新消息会进入
+同一任务的顺序队列，不再被直接拒绝。`取消任务` 只取消当前运行项，`清空队列`
+只清除尚未开始的消息。`状态`会显示当前项目和任务、运行时长、队列、待审批数量、
+连接状态、最近收取/回复时间和版本号。
+
+任务运行时会使用腾讯公开的 `getConfig` / `sendTyping` 接口显示微信输入状态。
+如果 Codex 连续 10 分钟没有任何任务活动，看门狗会中断当前项并继续后续队列。
+微信长轮询异常采用指数退避；`errcode=-14` 会明确记录为授权失效，需要在电脑重新
+运行 `login` 和 `service-restart`。
 
 项目文件写入需要回复：
 
@@ -283,6 +304,23 @@ npm pack --dry-run
 ```
 
 GitHub Actions 会在 macOS、Windows 和 Node.js 22 环境中执行这些检查。
+
+## 高级运行参数
+
+普通用户不需要修改。受控调试环境可以通过服务环境变量覆盖：
+
+```text
+CODEX_WEIXIN_BATCH_WINDOW_MS=2500
+CODEX_WEIXIN_TURN_IDLE_TIMEOUT_MS=600000
+CODEX_WEIXIN_RETRY_BASE_MS=1000
+CODEX_WEIXIN_RETRY_MAX_MS=60000
+```
+
+所有值必须是正整数毫秒，非法值会回退到安全默认值。机器可读诊断使用：
+
+```bash
+codex-weixin-bridge doctor --json
+```
 
 ## 协议和第三方组件
 
