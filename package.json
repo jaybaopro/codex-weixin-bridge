@@ -24,7 +24,7 @@
     "threads": "node src/cli.mjs threads",
     "login": "node src/cli.mjs login",
     "serve": "node src/cli.mjs serve",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "engines": {
     "node": ">=22"
