@@ -47,6 +47,11 @@ import {
   prepareInboundAttachment,
   removeInboundDirectory,
 } from "./inbound-media.mjs";
+import {
+  inspectWeixinArticleLinks,
+  prepareWeixinArticle,
+  weixinArticleSummary,
+} from "./weixin-article.mjs";
 import { BRIDGE_VERSION } from "./version.mjs";
 
 function messageKey(message) {
@@ -127,6 +132,7 @@ async function runBridgeLocked({
   log(`隔离配置：${isolation.permissionProfile}；MCP=${isolation.mcpServerCount}`);
   log("当前权限：仅当前项目可读；项目内文件写入需要微信单次确认；命令提权禁用。");
   log("附件边界：图片/PDF/文本附件只读；私有收件箱用后清理；语音/视频禁用。");
+  log("公开链接：仅无登录读取 mp.weixin.qq.com 公众号文章；Codex 通用联网仍禁用。");
   if (staleInboundRemoved) {
     log(`已清理 ${staleInboundRemoved} 个过期附件隔离目录。`);
   }
@@ -563,8 +569,35 @@ async function runBridgeLocked({
             });
             continue;
           }
-          const text = inbound.text;
+          let articleLinks;
+          let text;
+          try {
+            const inspectedLinks = inspectWeixinArticleLinks(inbound.text);
+            articleLinks = inspectedLinks.links;
+            text = inspectedLinks.text;
+          } catch (error) {
+            appendAuditPrivate("public_link_rejected", {
+              messageKey: auditMessageKey(key),
+              projectId: binding.projectId,
+              threadId: binding.threadId,
+              reason: String(error.message || error).slice(0, 200),
+            });
+            await deliver(
+              from,
+              contextToken,
+              `公众号链接未交给 Codex：${error.message}`,
+            );
+            continue;
+          }
           if (!text && !inbound.attachment) continue;
+          if (inbound.attachment && articleLinks.length) {
+            await deliver(
+              from,
+              contextToken,
+              "当前每条消息只处理 1 个外部输入；请把公众号文章链接和附件分开发送。",
+            );
+            continue;
+          }
 
           let preparedAttachment = null;
           if (inbound.attachment) {
@@ -592,6 +625,32 @@ async function runBridgeLocked({
                 from,
                 contextToken,
                 `附件未交给 Codex：${error.message}`,
+              );
+              continue;
+            }
+          } else if (articleLinks.length === 1) {
+            try {
+              preparedAttachment = await prepareWeixinArticle(articleLinks[0]);
+              appendAuditPrivate("public_link_accepted", {
+                messageKey: auditMessageKey(key),
+                projectId: binding.projectId,
+                threadId: binding.threadId,
+                type: preparedAttachment.kind,
+                size: preparedAttachment.size,
+                characters: preparedAttachment.characters,
+              });
+            } catch (error) {
+              errorLog(`公众号公开文章已拒绝：${error.message}`);
+              appendAuditPrivate("public_link_rejected", {
+                messageKey: auditMessageKey(key),
+                projectId: binding.projectId,
+                threadId: binding.threadId,
+                reason: String(error.message || error).slice(0, 200),
+              });
+              await deliver(
+                from,
+                contextToken,
+                `公众号文章未交给 Codex：${error.message}`,
               );
               continue;
             }
@@ -765,6 +824,7 @@ async function runBridgeLocked({
                 `项目：${binding.projectName || selectedProject.name}`,
                 `任务：${binding.threadName || "未命名任务"}`,
                 "读取边界：仅当前绑定项目",
+                "公开链接：仅微信公众号无登录公开文章",
                 `连接：${connectionLabels[runtime.connection?.state] || "初始化中"}`,
                 `最近收取：${formatLocalTime(runtime.lastPollAt)}`,
                 `最近回复：${formatLocalTime(runtime.lastReplyAt)}`,
@@ -897,7 +957,13 @@ async function runBridgeLocked({
                 : [
                     "已收到，正在等待短消息合并后交给 Codex。",
                     ...(preparedAttachment
-                      ? [`附件：${mediaSummary(preparedAttachment)}（只读）`]
+                      ? [
+                          `输入：${
+                            preparedAttachment.kind === "weixin-article"
+                              ? weixinArticleSummary(preparedAttachment)
+                              : mediaSummary(preparedAttachment)
+                          }（只读）`,
+                        ]
                       : []),
                     `项目：${binding.projectName || selectedProject.name}`,
                     `任务：${binding.threadName || "未命名任务"}`,
