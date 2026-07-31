@@ -23,11 +23,12 @@ function readJson(relativePath) {
 
 test("distribution package exposes a global CLI and direct QR dependency", () => {
   const pkg = readJson("package.json");
-  assert.equal(pkg.version, "0.6.1");
+  assert.equal(pkg.version, "0.7.0");
   assert.equal(pkg.private, true);
   assert.equal(pkg.bin["codex-weixin-bridge"], "./src/cli.mjs");
   assert.equal(pkg.dependencies["qrcode-terminal"], "0.12.0");
   assert.equal(pkg.dependencies["pdf-parse"], "2.4.5");
+  assert.equal(pkg.dependencies.cheerio, "1.2.0");
 });
 
 test("LaunchAgent rendering uses the installing user's paths", () => {
@@ -116,7 +117,7 @@ test("repo marketplace points to the self-hosted management plugin", () => {
     "plugins/codex-weixin-bridge/.codex-plugin/plugin.json",
   );
   assert.equal(manifest.name, "codex-weixin-bridge");
-  assert.equal(manifest.version, "0.6.1");
+  assert.equal(manifest.version, "0.7.0");
   assert.equal(manifest.skills, "./skills/");
 });
 

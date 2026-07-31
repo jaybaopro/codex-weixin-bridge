@@ -1,6 +1,6 @@
 {
   "name": "codex-weixin-bridge",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Manage a local, project-scoped Weixin ClawBot to Codex bridge.",
   "author": {
     "name": "Internal Team",
@@ -14,10 +14,10 @@
   "interface": {
     "displayName": "微信直连 Codex",
     "shortDescription": "管理本机微信直连 Codex 服务",
-    "longDescription": "安全安装、绑定、诊断、更新和维护项目隔离、支持只读附件的微信直连 Codex 本机服务。",
+    "longDescription": "安全安装、绑定、诊断、更新和维护项目隔离、支持只读附件及公众号公开文章的微信直连 Codex 本机服务。",
     "developerName": "Internal Team",
     "category": "Productivity",
-    "capabilities": ["Local automation", "Project-scoped access", "Read-only inbound media", "Approval-gated writes"],
+    "capabilities": ["Local automation", "Project-scoped access", "Read-only inbound media", "Weixin public articles", "Approval-gated writes"],
     "defaultPrompt": "检查并配置我的微信直连 Codex 服务。"
   }
 }

@@ -43,6 +43,7 @@ import {
 } from "./update.mjs";
 import { BRIDGE_VERSION } from "./version.mjs";
 import { INBOUND_MEDIA_LIMITS } from "./inbound-media.mjs";
+import { WEIXIN_ARTICLE_LIMITS } from "./weixin-article.mjs";
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -100,6 +101,7 @@ function printHelp() {
   }
   - 默认只读；项目内文件修改需在微信回复一次性审批码，传统命令提权禁用。
   - 支持只读图片、PDF 和 UTF-8 文本附件；语音、视频和可执行文件不接收。
+  - 支持无登录读取 https://mp.weixin.qq.com 的单篇公开文章；不读取文章图片，不执行 OCR。
   - 读取被限制在当前绑定项目；网络、连接器、MCP、删除、外部发送和发布会被拒绝。`);
 }
 
@@ -161,6 +163,14 @@ async function doctor(options = {}) {
       extractedCharacters: INBOUND_MEDIA_LIMITS.extractedCharacters,
       voiceEnabled: false,
       videoEnabled: false,
+    },
+    publicLinks: {
+      supportedHosts: ["mp.weixin.qq.com"],
+      loginCookies: false,
+      htmlBytes: WEIXIN_ARTICLE_LIMITS.htmlBytes,
+      extractedCharacters: WEIXIN_ARTICLE_LIMITS.extractedCharacters,
+      articleImagesFetched: false,
+      articleImageOcr: false,
     },
   };
 
