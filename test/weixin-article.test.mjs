@@ -11,6 +11,13 @@ import {
 
 const SHORT_URL = "https://mp.weixin.qq.com/s/FHwXWkyOOu4KJm8QYj8ENQ";
 
+test("article parser does not replace Node's global HTTP dispatcher", () => {
+  assert.equal(
+    globalThis[Symbol.for("undici.globalDispatcher.1")],
+    undefined,
+  );
+});
+
 function articleHtml({
   title = "一篇测试文章",
   body = "第一段\n第二段",

@@ -1,6 +1,6 @@
 # 微信直连 Codex 桥接器
 
-团队内测版 `0.7.0`：让每位同事在自己的 Mac 或 Windows 电脑上，通过自己的微信 ClawBot
+团队内测版 `0.7.1`：让每位同事在自己的 Mac 或 Windows 电脑上，通过自己的微信 ClawBot
 继续自己的 Codex 项目任务。
 
 代码通过公开 GitHub 仓库分发，不需要提交到 Codex 官方插件目录。
