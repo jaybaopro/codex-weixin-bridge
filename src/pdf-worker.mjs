@@ -2,7 +2,7 @@ import { parentPort } from "node:worker_threads";
 
 import { PDFParse } from "pdf-parse";
 
-parentPort.on("message", async ({ bytes, maxPages }) => {
+parentPort.once("message", async ({ bytes, maxPages }) => {
   const parser = new PDFParse({ data: new Uint8Array(bytes) });
   let response;
   try {
@@ -24,7 +24,8 @@ parentPort.on("message", async ({ bytes, maxPages }) => {
   } finally {
     await parser.destroy().catch(() => {});
   }
-  // The parent terminates this worker after receiving a result. On Windows,
-  // posting before native PDF cleanup finished could race with termination.
+  // This worker handles exactly one PDF. Closing the port lets the worker exit
+  // naturally after native PDF cleanup instead of racing a forced termination.
   parentPort.postMessage(response);
+  parentPort.close();
 });

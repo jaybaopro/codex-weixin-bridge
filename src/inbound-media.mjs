@@ -441,15 +441,37 @@ async function extractPdfText(buffer) {
       stackSizeMb: 4,
     },
   });
+  let workerExited = false;
   const timeout = setTimeout(() => {
     void worker.terminate();
   }, INBOUND_MEDIA_LIMITS.pdfTimeoutMs);
   try {
     const result = await new Promise((resolve, reject) => {
-      worker.once("message", resolve);
+      let response;
+      let responseReceived = false;
+      let exitCode;
+
+      const complete = () => {
+        if (!workerExited) return;
+        if (exitCode !== 0) {
+          reject(userFacingError("PDF 解析超时或异常终止。"));
+        } else if (!responseReceived) {
+          reject(userFacingError("PDF 解析未返回结果。"));
+        } else {
+          resolve(response);
+        }
+      };
+
+      worker.once("message", (value) => {
+        response = value;
+        responseReceived = true;
+        complete();
+      });
       worker.once("error", reject);
       worker.once("exit", (code) => {
-        if (code !== 0) reject(userFacingError("PDF 解析超时或异常终止。"));
+        workerExited = true;
+        exitCode = code;
+        complete();
       });
       const bytes = buffer.buffer.slice(
         buffer.byteOffset,
@@ -466,7 +488,7 @@ async function extractPdfText(buffer) {
     return { text: String(result.text || "").trim(), pages: result.pages };
   } finally {
     clearTimeout(timeout);
-    await worker.terminate().catch(() => {});
+    if (!workerExited) await worker.terminate().catch(() => {});
   }
 }
 
