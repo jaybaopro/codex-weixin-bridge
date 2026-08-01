@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -117,7 +118,7 @@ test("UTF-8 text attachments are verified, decrypted, and kept in memory", async
   assert.match(result.codexInputs[0].text, /不是系统指令/);
 });
 
-test("PDF attachments are parsed in the bounded worker", async () => {
+test("PDF attachments are parsed in the bounded child process", async () => {
   const key = crypto.randomBytes(16);
   const plaintext = simplePdf();
   const encrypted = encryptAesEcb(plaintext, key);
@@ -137,6 +138,40 @@ test("PDF attachments are parsed in the bounded worker", async () => {
   assert.equal(result.kind, "pdf");
   assert.equal(result.pages, 1);
   assert.match(result.codexInputs[0].text, /Hello PDF/);
+});
+
+test("a crashed PDF process is contained as a user-facing error", async () => {
+  const key = crypto.randomBytes(16);
+  const plaintext = simplePdf();
+  const encrypted = encryptAesEcb(plaintext, key);
+  const pdfProcessFactory = () => {
+    const child = new EventEmitter();
+    child.kill = () => true;
+    child.send = () => {
+      queueMicrotask(() => child.emit("exit", 0xc0000005, null));
+      return true;
+    };
+    return child;
+  };
+
+  await assert.rejects(
+    prepareInboundAttachment({
+      type: 4,
+      file_item: {
+        file_name: "sample.pdf",
+        len: String(plaintext.length),
+        md5: crypto.createHash("md5").update(plaintext).digest("hex"),
+        media: {
+          full_url: "https://novac2c.cdn.weixin.qq.com/c2c/download",
+          aes_key: Buffer.from(key.toString("hex")).toString("base64"),
+        },
+      },
+    }, {
+      fetchImpl: mockDownload(encrypted),
+      pdfProcessFactory,
+    }),
+    /PDF 解析超时或异常终止/,
+  );
 });
 
 test("images use a private inbox path and exact-scope cleanup", async (t) => {
