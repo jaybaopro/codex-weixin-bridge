@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import * as cheerio from "cheerio";
+import { load as loadHtml } from "cheerio/slim";
 
 export const WEIXIN_ARTICLE_LIMITS = Object.freeze({
   htmlBytes: 8 * 1024 * 1024,
@@ -251,7 +251,7 @@ function publishDateFromHtml(html) {
 }
 
 export function extractWeixinArticle(html, sourceUrl) {
-  const $ = cheerio.load(String(html || ""));
+  const $ = loadHtml(String(html || ""));
   const errorText = normalizeText($(".weui-msg__title").first().text());
   const content = $("#js_content").first();
   if (!content.length) {

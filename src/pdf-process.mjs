@@ -1,11 +1,11 @@
-import { parentPort } from "node:worker_threads";
-
 import { PDFParse } from "pdf-parse";
 
-parentPort.on("message", async ({ bytes, maxPages }) => {
-  const parser = new PDFParse({ data: new Uint8Array(bytes) });
+process.once("message", async ({ bytes, maxPages }) => {
+  let parser;
   let response;
   try {
+    const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    parser = new PDFParse({ data: new Uint8Array(data) });
     const info = await parser.getInfo();
     if (info.total > maxPages) {
       throw new Error(`PDF 页数超过上限（${info.total} > ${maxPages}）`);
@@ -22,9 +22,15 @@ parentPort.on("message", async ({ bytes, maxPages }) => {
       error: String(error?.message || error).slice(0, 500),
     };
   } finally {
-    await parser.destroy().catch(() => {});
+    await parser?.destroy().catch(() => {});
   }
-  // The parent terminates this worker after receiving a result. On Windows,
-  // posting before native PDF cleanup finished could race with termination.
-  parentPort.postMessage(response);
+
+  if (!process.send || !process.connected) {
+    process.exitCode = 1;
+    return;
+  }
+  process.send(response, (error) => {
+    if (error) process.exitCode = 1;
+    if (process.connected) process.disconnect();
+  });
 });

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
+import { fork } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { Worker } from "node:worker_threads";
 
 import {
   ensureStateDir,
@@ -433,32 +433,67 @@ function decodeText(buffer) {
   }
 }
 
-async function extractPdfText(buffer) {
-  const worker = new Worker(new URL("./pdf-worker.mjs", import.meta.url), {
-    resourceLimits: {
-      maxOldGenerationSizeMb: 192,
-      maxYoungGenerationSizeMb: 32,
-      stackSizeMb: 4,
-    },
+function createPdfProcess() {
+  return fork(new URL("./pdf-process.mjs", import.meta.url), [], {
+    execArgv: [
+      "--max-old-space-size=192",
+      "--max-semi-space-size=16",
+      "--stack-size=4096",
+    ],
+    serialization: "advanced",
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+    windowsHide: true,
   });
+}
+
+async function extractPdfText(buffer, processFactory = createPdfProcess) {
+  const child = processFactory();
+  let childExited = false;
+  let timedOut = false;
   const timeout = setTimeout(() => {
-    void worker.terminate();
+    timedOut = true;
+    child.kill();
   }, INBOUND_MEDIA_LIMITS.pdfTimeoutMs);
   try {
     const result = await new Promise((resolve, reject) => {
-      worker.once("message", resolve);
-      worker.once("error", reject);
-      worker.once("exit", (code) => {
-        if (code !== 0) reject(userFacingError("PDF 解析超时或异常终止。"));
+      let response;
+      let responseReceived = false;
+      let exitCode;
+      let exitSignal;
+
+      const complete = () => {
+        if (!childExited) return;
+        if (timedOut) {
+          reject(userFacingError("PDF 解析超时。"));
+        } else if (exitCode !== 0 || exitSignal) {
+          reject(userFacingError("PDF 解析超时或异常终止。"));
+        } else if (!responseReceived) {
+          reject(userFacingError("PDF 解析未返回结果。"));
+        } else {
+          resolve(response);
+        }
+      };
+
+      child.once("message", (value) => {
+        response = value;
+        responseReceived = true;
+        complete();
       });
-      const bytes = buffer.buffer.slice(
-        buffer.byteOffset,
-        buffer.byteOffset + buffer.byteLength,
-      );
-      worker.postMessage({
-        bytes,
+      child.once("error", () => {
+        reject(userFacingError("PDF 解析子进程启动失败。"));
+      });
+      child.once("exit", (code, signal) => {
+        childExited = true;
+        exitCode = code;
+        exitSignal = signal;
+        complete();
+      });
+      child.send({
+        bytes: Buffer.from(buffer),
         maxPages: INBOUND_MEDIA_LIMITS.pdfPages,
-      }, [bytes]);
+      }, (error) => {
+        if (error) reject(userFacingError("PDF 无法发送到解析子进程。"));
+      });
     });
     if (!result?.ok) {
       throw userFacingError(`PDF 无法安全解析：${result?.error || "未知错误"}`);
@@ -466,7 +501,7 @@ async function extractPdfText(buffer) {
     return { text: String(result.text || "").trim(), pages: result.pages };
   } finally {
     clearTimeout(timeout);
-    await worker.terminate().catch(() => {});
+    if (!childExited) child.kill();
   }
 }
 
@@ -510,6 +545,7 @@ function documentInput({ name, kind, text, pages, hash }) {
 
 export async function prepareInboundAttachment(item, {
   fetchImpl = fetch,
+  pdfProcessFactory = createPdfProcess,
 } = {}) {
   if (item?.type === 2) {
     const imageItem = item.image_item;
@@ -590,7 +626,7 @@ export async function prepareInboundAttachment(item, {
     if (buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
       throw userFacingError("文件扩展名为 PDF，但内容不是有效 PDF。");
     }
-    const extracted = await extractPdfText(buffer);
+    const extracted = await extractPdfText(buffer, pdfProcessFactory);
     return documentInput({
       name,
       kind: "pdf",

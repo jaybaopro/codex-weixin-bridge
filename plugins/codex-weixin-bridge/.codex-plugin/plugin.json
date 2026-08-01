@@ -1,6 +1,6 @@
 {
   "name": "codex-weixin-bridge",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Manage a local, project-scoped Weixin ClawBot to Codex bridge.",
   "author": {
     "name": "Internal Team",
